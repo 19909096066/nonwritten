@@ -1,0 +1,93 @@
+{
+  "pages": [
+    {
+      "path": "pages/index/index",
+      "style": {
+        "navigationBarTitleText": "首页",
+        "navigationBarBackgroundColor": "#3b82f6",
+        "navigationBarTextStyle": "white"
+      }
+    },
+    {
+      "path": "pages/scan-in/scan-in",
+      "style": {
+        "navigationBarTitleText": "扫码入库",
+        "navigationBarBackgroundColor": "#3b82f6",
+        "navigationBarTextStyle": "white"
+      }
+    },
+    {
+      "path": "pages/scan-out/scan-out",
+      "style": {
+        "navigationBarTitleText": "扫码出库",
+        "navigationBarBackgroundColor": "#3b82f6",
+        "navigationBarTextStyle": "white"
+      }
+    },
+    {
+      "path": "pages/scan-query/scan-query",
+      "style": {
+        "navigationBarTitleText": "扫码查询",
+        "navigationBarBackgroundColor": "#3b82f6",
+        "navigationBarTextStyle": "white"
+      }
+    },
+    {
+      "path": "pages/manual-query/manual-query",
+      "style": {
+        "navigationBarTitleText": "手动查询",
+        "navigationBarBackgroundColor": "#3b82f6",
+        "navigationBarTextStyle": "white"
+      }
+    },
+    {
+      "path": "pages/records/records",
+      "style": {
+        "navigationBarTitleText": "操作记录",
+        "navigationBarBackgroundColor": "#3b82f6",
+        "navigationBarTextStyle": "white"
+      }
+    },
+    {
+      "path": "pages/login/login",
+      "style": {
+        "navigationBarTitleText": "登录",
+        "navigationBarBackgroundColor": "#3b82f6",
+        "navigationBarTextStyle": "white"
+      }
+    }
+  ],
+  "globalStyle": {
+    "navigationBarTextStyle": "white",
+    "navigationBarTitleText": "原材料管理",
+    "navigationBarBackgroundColor": "#3b82f6",
+    "backgroundColor": "#f5f5f5"
+  },
+  "tabBar": {
+    "color": "#7A7E83",
+    "selectedColor": "#3b82f6",
+    "borderStyle": "black",
+    "backgroundColor": "#ffffff",
+    "list": [
+      {
+        "pagePath": "pages/index/index",
+        "iconPath": "static/tabbar/home.png",
+        "selectedIconPath": "static/tabbar/home-active.png",
+        "text": "首页"
+      },
+      {
+        "pagePath": "pages/manual-query/manual-query",
+        "iconPath": "static/tabbar/search.png",
+        "selectedIconPath": "static/tabbar/search-active.png",
+        "text": "查询"
+      },
+      {
+        "pagePath": "pages/records/records",
+        "iconPath": "static/tabbar/record.png",
+        "selectedIconPath": "static/tabbar/record-active.png",
+        "text": "记录"
+      }
+    ]
+  },
+  "uniIdRouter": {}
+}
