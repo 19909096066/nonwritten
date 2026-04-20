@@ -3,13 +3,14 @@ import { useAuth } from '@/contexts/AuthContext';
 import {
   LayoutDashboard,
   Package,
-  ClipboardList,
+  ClipboardList, ClipboardCheck,
   Users,
   FileText,
   ChevronDown,
   LogOut,
   Menu,
   BarChart3,
+  Factory,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
@@ -141,6 +142,79 @@ export function MainLayout({ children }: { children: React.ReactNode }) {
       permission: 'userManage',
     },
     {
+      title: '生产管理',
+      icon: <Factory className="w-5 h-5" />,
+      permission: 'production',
+      children: [
+        {
+          title: '产品管理',
+          path: '/production/products',
+          icon: <></>,
+          permission: 'productManage',
+        },
+        {
+          title: 'BOM管理',
+          path: '/production/boms',
+          icon: <></>,
+          permission: 'bomManage',
+        },
+        {
+          title: '生产工单',
+          path: '/production/workorders',
+          icon: <></>,
+          permission: 'workorderManage',
+        },
+        {
+          title: '成品入库',
+          path: '/production/finished',
+          icon: <></>,
+          permission: 'finishedManage',
+        },
+      ],
+    },
+    
+    {
+      title: '客户管理',
+      path: '/crm/customers',
+      icon: <Users className="w-5 h-5" />,
+    },
+    {
+      title: 'MES生产管理',
+      path: '/mes',
+      icon: <Factory className="w-5 h-5" />,
+    },
+    {
+      title: 'BI分析中心',
+      icon: <BarChart3 className="w-5 h-5" />,
+      children: [
+        {
+          title: '综合概览',
+          path: '/bi',
+          icon: <></>,
+        },
+        {
+          title: '能源监控',
+          path: '/bi/energy',
+          icon: <></>,
+        },
+        {
+          title: '仓储监控',
+          path: '/bi/warehouse',
+          icon: <></>,
+        },
+      ],
+    },
+    {
+      title: '审批中心',
+      path: '/approval',
+      icon: <ClipboardList className="w-5 h-5" />,
+    },
+    {
+      title: '质检分析',
+      path: '/qc/analytics',
+      icon: <ClipboardCheck className="w-5 h-5" />,
+    },
+{
       title: '报表中心',
       path: '/report',
       icon: <BarChart3 className="w-5 h-5" />,

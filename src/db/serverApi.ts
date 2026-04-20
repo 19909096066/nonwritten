@@ -1,7 +1,7 @@
 // 腾讯云服务器 API 接口
 // 服务器地址: 81.70.90.164
 
-const SERVER_URL = 'http://81.70.90.164/api';
+const SERVER_URL = 'http://81.70.90.164:3001/api';
 
 // 获取 token
 function getToken(): string | null {
@@ -483,10 +483,275 @@ export function parseQrCode(qrCode: string): QrCodeData | null {
 
 // 统一导出
 export default {
+  production: productionApi,
   auth: authApi,
   user: userApi,
   material: materialApi,
   log: logApi,
   stats: statsApi,
   parseQrCode,
+};
+
+
+// ==================== 生产管理 API ====================
+
+// 产品类型
+export interface Product {
+  id: string;
+  product_code: string;
+  product_name: string;
+  spec_gsm: number;
+  spec_width: number;
+  spec_color: string;
+  spec_material: string;
+  unit: string;
+  is_active: number;
+  created_at: string;
+  updated_at: string;
+}
+
+// BOM类型
+export interface BomHeader {
+  id: string;
+  bom_code: string;
+  product_id: string;
+  product_name?: string;
+  spec_gsm?: number;
+  spec_width?: number;
+  spec_color?: string;
+  bom_version: string;
+  effective_date: string;
+  status: 'draft' | 'active' | 'deprecated';
+  total_loss_rate: number;
+  remarks: string;
+  created_by: string;
+  created_at: string;
+}
+
+export interface BomItem {
+  id: string;
+  bom_id: string;
+  material_model: string;
+  quantity_per_unit: number;
+  loss_rate: number;
+  unit: string;
+  material_order: number;
+  remarks: string;
+}
+
+// 工单类型
+export interface WorkOrder {
+  id: string;
+  order_no: string;
+  product_id: string;
+  product_name?: string;
+  spec_gsm?: number;
+  spec_width?: number;
+  spec_color?: string;
+  unit?: string;
+  bom_id: string;
+  bom_version?: string;
+  plan_quantity: number;
+  completed_quantity: number;
+  qualified_quantity: number;
+  reject_quantity: number;
+  due_date: string;
+  priority: number;
+  status: 'pending' | 'released' | 'in_progress' | 'paused' | 'completed' | 'cancelled';
+  line_id: string;
+  remarks: string;
+  created_by: string;
+  created_at: string;
+}
+
+export interface WorkOrderMaterial {
+  id: string;
+  work_order_id: string;
+  material_model: string;
+  plan_quantity: number;
+  actual_quantity: number;
+  picked_quantity: number;
+  shortage_quantity: number;
+}
+
+// 成品入库类型
+export interface FinishedProduct {
+  id: string;
+  product_id: string;
+  product_name?: string;
+  spec_gsm?: number;
+  spec_width?: number;
+  spec_color?: number;
+  unit?: string;
+  work_order_id: string;
+  order_no?: string;
+  batch_no: string;
+  quantity: number;
+  qualified_qty: number;
+  reject_qty: number;
+  weight: number;
+  warehouse: string;
+  operator: string;
+  produced_at: string;
+  created_at: string;
+}
+
+// 生产管理 API
+export const productionApi = {
+  // -------- 产品管理 --------
+  async getProducts(params?: { is_active?: number; keyword?: string }) {
+    const searchParams = new URLSearchParams();
+    if (params?.is_active !== undefined) searchParams.set('is_active', String(params.is_active));
+    if (params?.keyword) searchParams.set('keyword', params.keyword);
+    const query = searchParams.toString() ? `?${searchParams.toString()}` : '';
+    return request<{ success: boolean; data: Product[] }>(`/production/products${query}`);
+  },
+
+  async getProduct(id: string) {
+    return request<{ success: boolean; data: Product }>(`/production/products/${id}`);
+  },
+
+  async createProduct(data: Partial<Product>) {
+    return request<{ success: boolean; data: Product }>('/production/products', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  },
+
+  async updateProduct(id: string, data: Partial<Product>) {
+    return request<{ success: boolean; data: Product }>(`/production/products/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    });
+  },
+
+  async deleteProduct(id: string) {
+    return request<{ success: boolean; message: string }>(`/production/products/${id}`, {
+      method: 'DELETE',
+    });
+  },
+
+  // -------- BOM管理 --------
+  async getBoms(params?: { product_id?: string; status?: string }) {
+    const searchParams = new URLSearchParams();
+    if (params?.product_id) searchParams.set('product_id', params.product_id);
+    if (params?.status) searchParams.set('status', params.status);
+    const query = searchParams.toString() ? `?${searchParams.toString()}` : '';
+    return request<{ success: boolean; data: BomHeader[] }>(`/production/boms${query}`);
+  },
+
+  async getBom(id: string) {
+    return request<{ success: boolean; data: BomHeader & { items: BomItem[] } }>(`/production/boms/${id}`);
+  },
+
+  async createBom(data: { product_id: string; bom_version?: string; effective_date: string; total_loss_rate?: number; remarks?: string; items: Partial<BomItem>[] }) {
+    return request<{ success: boolean; data: BomHeader }>('/production/boms', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  },
+
+  async updateBom(id: string, data: Partial<BomHeader>) {
+    return request<{ success: boolean; data: BomHeader }>(`/production/boms/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    });
+  },
+
+  async updateBomItems(id: string, items: Partial<BomItem>[]) {
+    return request<{ success: boolean; message: string }>(`/production/boms/${id}/items`, {
+      method: 'PUT',
+      body: JSON.stringify({ items }),
+    });
+  },
+
+  async activateBom(id: string) {
+    return request<{ success: boolean; message: string }>(`/production/boms/${id}/activate`, {
+      method: 'PUT',
+    });
+  },
+
+  async deleteBom(id: string) {
+    return request<{ success: boolean; message: string }>(`/production/boms/${id}`, {
+      method: 'DELETE',
+    });
+  },
+
+  // -------- 工单管理 --------
+  async getWorkOrders(params?: { status?: string; product_id?: string; keyword?: string }) {
+    const searchParams = new URLSearchParams();
+    if (params?.status) searchParams.set('status', params.status);
+    if (params?.product_id) searchParams.set('product_id', params.product_id);
+    if (params?.keyword) searchParams.set('keyword', params.keyword);
+    const query = searchParams.toString() ? `?${searchParams.toString()}` : '';
+    return request<{ success: boolean; data: WorkOrder[] }>(`/production/workorders${query}`);
+  },
+
+  async getWorkOrder(id: string) {
+    return request<{ success: boolean; data: WorkOrder & { materials: WorkOrderMaterial[] } }>(`/production/workorders/${id}`);
+  },
+
+  async createWorkOrder(data: { product_id: string; bom_id: string; plan_quantity: number; due_date?: string; priority?: number; line_id?: string; remarks?: string }) {
+    return request<{ success: boolean; data: WorkOrder }>('/production/workorders', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  },
+
+  async updateWorkOrderStatus(id: string, status: string) {
+    return request<{ success: boolean; data: WorkOrder }>(`/production/workorders/${id}/status`, {
+      method: 'PUT',
+      body: JSON.stringify({ status }),
+    });
+  },
+
+  async completeWorkOrder(id: string, data: { qualified_quantity: number; reject_quantity?: number; finished_products?: Partial<FinishedProduct>[] }) {
+    return request<{ success: boolean; message: string }>(`/production/workorders/${id}/complete`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    });
+  },
+
+  async deleteWorkOrder(id: string) {
+    return request<{ success: boolean; message: string }>(`/production/workorders/${id}`, {
+      method: 'DELETE',
+    });
+  },
+
+  // -------- 成品入库 --------
+  async getFinishedProducts(params?: { product_id?: string; start_date?: string; end_date?: string }) {
+    const searchParams = new URLSearchParams();
+    if (params?.product_id) searchParams.set('product_id', params.product_id);
+    if (params?.start_date) searchParams.set('start_date', params.start_date);
+    if (params?.end_date) searchParams.set('end_date', params.end_date);
+    const query = searchParams.toString() ? `?${searchParams.toString()}` : '';
+    return request<{ success: boolean; data: FinishedProduct[] }>(`/production/finished${query}`);
+  },
+
+  async createFinishedProduct(data: Partial<FinishedProduct>) {
+    return request<{ success: boolean; data: FinishedProduct }>('/production/finished', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  },
+
+  async deleteFinishedProduct(id: string) {
+    return request<{ success: boolean; message: string }>(`/production/finished/${id}`, {
+      method: 'DELETE',
+    });
+  },
+
+  // -------- 统计 --------
+  async getOutputStats(params?: { start_date?: string; end_date?: string; group_by?: string }) {
+    const searchParams = new URLSearchParams();
+    if (params?.start_date) searchParams.set('start_date', params.start_date);
+    if (params?.end_date) searchParams.set('end_date', params.end_date);
+    if (params?.group_by) searchParams.set('group_by', params.group_by);
+    const query = searchParams.toString() ? `?${searchParams.toString()}` : '';
+    return request<{ success: boolean; data: any[] }>(`/production/stats/output${query}`);
+  },
+
+  async getWorkOrderStats() {
+    return request<{ success: boolean; data: any[] }>('/production/stats/workorders');
+  },
 };

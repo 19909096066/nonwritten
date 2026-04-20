@@ -1,10 +1,4 @@
 import DashboardPage from './pages/DashboardPage';
-import MESPage from './pages/mes/MESPage';
-import BIDashboardPage from './pages/bi/BIDashboardPage';
-import EnergyBIPage from './pages/bi/EnergyBIPage';
-import WarehouseBIPage from './pages/bi/WarehouseBIPage';
-import ApprovalCenterPage from './pages/approval/ApprovalCenterPage';
-import QCAnalyticsPage from './pages/qc/QCAnalyticsPage';
 import LoginPage from './pages/LoginPage';
 import StockListPage from './pages/stock/StockListPage';
 import StockInPage from './pages/stock/StockInPage';
@@ -27,7 +21,6 @@ import BomsPage from './pages/production/BomsPage';
 import WorkOrdersPage from './pages/production/WorkOrdersPage';
 import FinishedPage from './pages/production/FinishedPage';
 import type { ReactNode } from 'react';
-import CustomersPage from './pages/crm/CustomersPage';
 
 interface RouteConfig {
   name: string;
@@ -124,51 +117,32 @@ const routes: RouteConfig[] = [
     name: '生产管理',
     path: '/production',
     element: <ProductionPage />,
+    visible: false,
   },
   {
     name: '产品管理',
     path: '/production/products',
     element: <ProductsPage />,
+    visible: false,
   },
   {
     name: 'BOM管理',
     path: '/production/boms',
     element: <BomsPage />,
+    visible: false,
   },
   {
     name: '生产工单',
     path: '/production/workorders',
     element: <WorkOrdersPage />,
+    visible: false,
   },
   {
     name: '成品入库',
     path: '/production/finished',
     element: <FinishedPage />,
-  },
-  {
-    name: '客户管理',
-    path: '/crm/customers',
-    element: <CustomersPage />,
-  },
-  {
-    name: 'MES生产管理',
-    path: '/mes',
-    element: <MESPage />,
-  },
-  {
-    name: 'BI分析中心',
-    path: '/bi',
-    element: <BIDashboardPage />,
-  },
-  {
-    name: '审批中心',
-    path: '/approval',
-    element: <ApprovalCenterPage />,
-  },
-  {
-    name: '质检分析',
-    path: '/qc/analytics',
-    element: <QCAnalyticsPage />,
+    visible: false,
   },
 ];
+
 export default routes;

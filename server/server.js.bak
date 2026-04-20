@@ -6,35 +6,9 @@ const jwt = require('jsonwebtoken');
 const { v4: uuidv4 } = require('uuid');
 const mysql = require('mysql2/promise');
 const path = require('path');
-const fs = require('fs');
-
-// 日志配置
-const LOG_DIR = path.join(__dirname, 'logs');
-if (!fs.existsSync(LOG_DIR)) {
-  fs.mkdirSync(LOG_DIR, { recursive: true });
-}
-
-function writeApiLog(action, req, res, extra) {
-  const date = new Date().toISOString().split('T')[0];
-  const timestamp = new Date().toISOString();
-  const user = req.user ? (req.user.name || req.user.phone || 'unknown') : 'anonymous';
-  const ip = req.ip || req.connection.remoteAddress || '-';
-  const logFile = path.join(LOG_DIR, 'api-' + date + '.log');
-  const logMessage = '[' + timestamp + '] [' + action + '] user=' + user + ' ip=' + ip + ' method=' + req.method + ' path=' + req.path + ' status=' + res.statusCode + ' ' + JSON.stringify(extra) + '\n';
-  fs.appendFileSync(logFile, logMessage);
-}
-
-function writeStockLog(action, data) {
-  const date = new Date().toISOString().split('T')[0];
-  const timestamp = new Date().toISOString();
-  const logFile = path.join(LOG_DIR, 'stock-' + date + '.log');
-  const logMessage = '[' + timestamp + '] [' + action + '] ' + JSON.stringify(data) + '\n';
-  fs.appendFileSync(logFile, logMessage);
-}
-
 
 const app = express();
-const PORT = process.env.PORT || 3001;
+const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
 
 // 中间件
@@ -43,6 +17,16 @@ app.use(express.json());
 
 // 静态文件服务 - 服务前端构建产物
 app.use(express.static(path.join(__dirname, '../dist')));
+
+// SPA 回退路由 - 所有非 API 路由返回 index.html
+// 使用正则匹配所有路由，排除 /api 和 /download 开头的路径
+app.get(/^\/(?!api|download).*/, (req, res) => {
+  res.sendFile(path.join(__dirname, '../dist/index.html'), (err) => {
+    if (err) {
+      res.status(500).send('Server Error');
+    }
+  });
+});
 
 // MySQL连接池配置
 const dbConfig = {
@@ -402,11 +386,6 @@ app.put('/api/users/:id/reset-password', authenticateToken, async (req, res) => 
   const { id } = req.params;
   const { newPassword } = req.body;
   
-  // 只允许管理员重置密码
-  if (req.user.role !== 'admin') {
-    return res.status(403).json({ error: '只有管理员可以重置密码' });
-  }
-  
   if (!newPassword || newPassword.length < 6) {
     return res.status(400).json({ error: '密码至少6位' });
   }
@@ -436,13 +415,12 @@ app.put('/api/users/:id/reset-password', authenticateToken, async (req, res) => 
 
 // 获取物料列表
 app.get('/api/materials', authenticateToken, async (req, res) => {
-  try {
   const { page = 1, pageSize = 20, keyword, status, batchNo, model, startDate, endDate } = req.query;
   
   let sql = `SELECT 
     id, qr_code, batch_no, package_no, model,
     production_date,
-    weight, unit, status, operator, out_operator, device, remark,
+    weight, unit, status, operator, device, remark,
     out_at,
     split_at,
     split_operator,
@@ -501,10 +479,6 @@ app.get('/api/materials', authenticateToken, async (req, res) => {
   const [rows] = await pool.execute(sql, params);
   const formattedRows = rows.map(formatMaterialDates);
   res.json({ data: formattedRows, total });
-  } catch (error) {
-    console.error('获取物料列表失败:', error);
-    res.status(500).json({ error: '服务器错误' });
-  }
 });
 
 // 根据二维码获取物料
@@ -514,7 +488,7 @@ app.get('/api/materials/qr/:code', authenticateToken, async (req, res) => {
     const [rows] = await pool.execute(`SELECT 
       id, qr_code, batch_no, package_no, model,
       production_date,
-      weight, unit, status, operator, out_operator, device, remark,
+      weight, unit, status, operator, device, remark,
       out_at,
       split_at,
       split_operator,
@@ -606,7 +580,6 @@ app.post('/api/materials', authenticateToken, async (req, res) => {
       console.error('自动匹配失败:', matchError);
     }
 
-    writeStockLog('STOCK_IN', { qr_code, batch_no, package_no: finalPackageNo, model, weight, operator, device });
     res.status(201).json({ id, qr_code, batch_no, package_no: finalPackageNo, model, weight, status: 'in_stock' });
   } catch (error) {
     console.error('入库错误:', error);
@@ -629,7 +602,7 @@ app.post('/api/materials/out', authenticateToken, async (req, res) => {
       `SELECT 
         id, qr_code, batch_no, package_no, model,
         production_date,
-        weight, unit, status, operator, out_operator, device, remark,
+        weight, unit, status, operator, device, remark,
         out_at,
         split_at,
         split_operator,
@@ -646,7 +619,7 @@ app.post('/api/materials/out', authenticateToken, async (req, res) => {
 
     // 更新状态
     await pool.execute(
-      "UPDATE raw_materials SET status = 'out_stock', out_at = NOW(), out_operator = ?, remark = '已出库', device = ? WHERE id = ?",
+      "UPDATE raw_materials SET status = 'out_stock', out_at = NOW(), operator = ?, remark = '已出库', device = ? WHERE id = ?",
       [operator, device, material.id]
     );
 
@@ -679,7 +652,7 @@ app.post('/api/materials/split', authenticateToken, async (req, res) => {
       `SELECT 
         id, qr_code, batch_no, package_no, model,
         production_date,
-        weight, unit, status, operator, out_operator, device, remark,
+        weight, unit, status, operator, device, remark,
         out_at,
         split_at,
         split_operator,
@@ -741,7 +714,7 @@ app.get('/api/materials/:id', authenticateToken, async (req, res) => {
     const { id } = req.params;
     const [rows] = await pool.execute(`
       SELECT id, qr_code, batch_no, package_no, model, production_date, weight, unit, 
-             status, operator, out_operator, device, remark,
+             status, operator, device, remark,
              out_at, split_at, split_operator, created_at
       FROM raw_materials WHERE id = ?
     `, [id]);
@@ -873,7 +846,6 @@ app.get('/api/stats/dashboard', authenticateToken, async (req, res) => {
         todaySplitWeight = row.weight || 0;
       }
     });
-    writeApiLog('DASHBOARD', req, res, { totalStock, todayIn, todayOut, todaySplit });
 
     res.json({
       totalStock,
@@ -1165,14 +1137,11 @@ app.get('/api/stats/inout-summary', authenticateToken, async (req, res) => {
     // 按型号统计
     const [modelStats] = await pool.execute(`
       SELECT 
-        rm.model,
-        ol.operation_type,
+        operation_type,
         COUNT(*) as count
-      FROM operation_logs ol
-      LEFT JOIN raw_materials rm ON ol.qr_code = rm.qr_code
-      WHERE rm.model IS NOT NULL ${dateFilter}
-      GROUP BY rm.model, ol.operation_type
-      ORDER BY count DESC
+      FROM operation_logs
+      WHERE 1=1 ${dateFilter}
+      GROUP BY operation_type
     `, params);
 
     res.json({
@@ -1361,7 +1330,7 @@ app.post('/api/purchase/params/batch', authenticateToken, async (req, res) => {
         // 新增
         const id = uuidv4();
         await pool.execute(
-          `INSERT INTO purchase_params (id, model, stock_days, lead_days, min_purchase, enabled) VALUES (?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO purchase_params (id, model, stock_days, lead_days, min_purchase, enabled) VALUES (?, ?, ?, ?, ?, ?`,
           [id, param.model, param.stock_days, param.lead_days, param.min_purchase, param.enabled]
         );
       }
@@ -3400,16 +3369,6 @@ app.post('/api/wechat-bot/test', authenticateToken, async (req, res) => {
   } catch (error) {
     res.status(500).json({ error: '测试发送失败' });
   }
-});
-
-// SPA 回退路由 - 所有非 API 路由返回 index.html
-// 放在所有API路由之后，确保不会拦截新增路由
-app.get(/^\/(?!api|download).*/, (req, res) => {
-  res.sendFile(path.join(__dirname, '../dist/index.html'), (err) => {
-    if (err) {
-      res.status(500).send('Server Error');
-    }
-  });
 });
 
 // 启动服务器

@@ -5,11 +5,13 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { v4: uuidv4 } = require('uuid');
 const mysql = require('mysql2/promise');
+
+// 生产管理和质检管理路由
 const path = require('path');
 const fs = require('fs');
 
 // 日志配置
-const LOG_DIR = path.join(__dirname, '../logs');
+const LOG_DIR = path.join(__dirname, 'logs');
 if (!fs.existsSync(LOG_DIR)) {
   fs.mkdirSync(LOG_DIR, { recursive: true });
 }
@@ -42,6 +44,284 @@ app.use(cors());
 app.use(express.json());
 
 // 静态文件服务 - 服务前端构建产物
+// ============ 审批管理 API ============
+
+// 获取待我审批的列表
+app.get('/api/approval/records', authenticateToken, async (req, res) => {
+  try {
+    const { status, page = 1, pageSize = 20 } = req.query;
+    const offset = (page - 1) * pageSize;
+    
+    let whereClause = '1=1';
+    const params = [];
+    
+    if (status === 'pending') {
+      whereClause += ' AND ar.status = ?';
+      params.push('pending');
+    } else if (status === 'approved') {
+      whereClause += ' AND ar.status = ?';
+      params.push('approved');
+    } else if (status === 'rejected') {
+      whereClause += ' AND ar.status = ?';
+      params.push('rejected');
+    }
+    
+    const [rows] = await pool.execute(`
+      SELECT ar.*, af.flow_name, af.flow_code, af.flow_type
+      FROM approval_records ar
+      LEFT JOIN approval_flows af ON ar.flow_id = af.id
+      WHERE ${whereClause}
+      ORDER BY ar.created_at DESC
+      LIMIT ? OFFSET ?
+    `, [...params, Number(pageSize), Number(offset)]);
+    
+    const [countResult] = await pool.execute(`
+      SELECT COUNT(*) as total FROM approval_records ar WHERE ${whereClause}
+    `, params);
+    
+    res.json({ code: 0, data: rows, total: countResult[0].total });
+  } catch (error) {
+    console.error('获取审批记录失败', error);
+    res.status(500).json({ code: 1, message: '获取审批记录失败' });
+  }
+});
+
+// 发起审批
+app.post('/api/approval/records', authenticateToken, async (req, res) => {
+  try {
+    const { flow_id, target_table, target_id, target_title, target_summary, priority = 'medium' } = req.body;
+    const userId = req.user?.id;
+    
+    if (!flow_id || !target_table || !target_id) {
+      return res.status(400).json({ code: 1, message: '缺少必要参数' });
+    }
+    
+    const [flows] = await pool.execute('SELECT * FROM approval_flows WHERE id = ?', [flow_id]);
+    if (flows.length === 0) {
+      return res.status(404).json({ code: 1, message: '流程不存在' });
+    }
+    
+    const flow = flows[0];
+    const approvers = flow.approvers ? JSON.parse(flow.approvers) : [];
+    
+    const id = uuid();
+    const currentStep = 1;
+    const totalSteps = approvers.length || 1;
+    
+    await pool.execute(`
+      INSERT INTO approval_records (id, flow_id, target_table, target_id, target_title, target_summary, requester_id, current_step, total_steps, status, priority)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+    `, [id, flow_id, target_table, target_id, target_title || '', target_summary || '', userId, currentStep, totalSteps, priority]);
+    
+    for (let i = 0; i < approvers.length; i++) {
+      const approverId = approvers[i];
+      const detailId = uuid();
+      await pool.execute(`
+        INSERT INTO approval_details (id, record_id, step_number, approver_id, status)
+        VALUES (?, ?, ?, ?, 'pending')
+      `, [detailId, id, i + 1, approverId]);
+    }
+    
+    res.json({ code: 0, message: '审批已发起', data: { id } });
+  } catch (error) {
+    console.error('发起审批失败', error);
+    res.status(500).json({ code: 1, message: '发起审批失败' });
+  }
+});
+
+// 审批通过
+app.post('/api/approval/records/:id/approve', authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { remark } = req.body;
+    const userId = req.user?.id;
+    
+    const [records] = await pool.execute('SELECT * FROM approval_records WHERE id = ?', [id]);
+    if (records.length === 0) {
+      return res.status(404).json({ code: 1, message: '审批记录不存在' });
+    }
+    
+    const record = records[0];
+    
+    await pool.execute(`
+      UPDATE approval_details SET status = 'approved', approved_at = NOW(), approved_by = ?, remark = ?
+      WHERE record_id = ? AND step_number = ?
+    `, [userId, remark || '', id, record.current_step]);
+    
+    if (record.current_step < record.total_steps) {
+      await pool.execute(`
+        UPDATE approval_records SET current_step = current_step + 1 WHERE id = ?
+      `, [id]);
+    } else {
+      await pool.execute(`UPDATE approval_records SET status = 'approved', completed_at = NOW() WHERE id = ?`, [id]);
+    }
+    
+    res.json({ code: 0, message: '审批已通过' });
+  } catch (error) {
+    console.error('审批通过失败', error);
+    res.status(500).json({ code: 1, message: '审批失败' });
+  }
+});
+
+// 审批驳回
+app.post('/api/approval/records/:id/reject', authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { remark } = req.body;
+    const userId = req.user?.id;
+    
+    const [records] = await pool.execute('SELECT * FROM approval_records WHERE id = ?', [id]);
+    if (records.length === 0) {
+      return res.status(404).json({ code: 1, message: '审批记录不存在' });
+    }
+    
+    const record = records[0];
+    
+    await pool.execute(`
+      UPDATE approval_details SET status = 'rejected', approved_at = NOW(), approved_by = ?, remark = ?
+      WHERE record_id = ? AND step_number = ?
+    `, [userId, remark || '', id, record.current_step]);
+    
+    await pool.execute(`
+      UPDATE approval_records SET status = 'rejected', completed_at = NOW() WHERE id = ?
+    `, [id]);
+    
+    res.json({ code: 0, message: '审批已驳回' });
+  } catch (error) {
+    console.error('审批驳回失败', error);
+    res.status(500).json({ code: 1, message: '审批失败' });
+  }
+});
+
+// 获取能源看板数据
+app.get('/api/bi/energy', authenticateToken, async (req, res) => {
+  try {
+    const days = Number(req.query.days) || 30;
+    
+    const [lineSummary] = await pool.execute(`
+      SELECT 
+        pl.line_name,
+        pl.line_type,
+        COALESCE(SUM(er.reading_value), 0) as total_consumption,
+        COALESCE(AVG(er.reading_value), 0) as avg_daily
+      FROM production_lines pl
+      LEFT JOIN energy_meters em ON pl.id = em.line_id
+      LEFT JOIN energy_readings er ON em.id = er.meter_id AND er.reading_date >= DATE_SUB(CURDATE(), INTERVAL ? DAY)
+      GROUP BY pl.id, pl.line_name, pl.line_type
+    `, [days]);
+    
+    const [dailyTrend] = await pool.execute(`
+      SELECT 
+        er.reading_date as date,
+        em.meter_type,
+        SUM(er.reading_value) as value
+      FROM energy_readings er
+      LEFT JOIN energy_meters em ON er.meter_id = em.id
+      WHERE er.reading_date >= DATE_SUB(CURDATE(), INTERVAL ? DAY)
+      GROUP BY er.reading_date, em.meter_type
+      ORDER BY er.reading_date
+    `, [days]);
+    
+    const [outputData] = await pool.execute(`
+      SELECT 
+        DATE(fp.produced_at) as date,
+        SUM(fp.weight) as output_weight
+      FROM finished_products fp
+      WHERE fp.produced_at >= DATE_SUB(CURDATE(), INTERVAL ? DAY)
+      GROUP BY DATE(fp.produced_at)
+    `, [days]);
+    
+    res.json({
+      code: 0,
+      data: {
+        lineSummary,
+        dailyTrend,
+        outputData
+      }
+    });
+  } catch (error) {
+    console.error('获取能源看板数据失败', error);
+    res.status(500).json({ code: 1, message: '获取能源数据失败' });
+  }
+});
+
+// 获取仓储看板数据
+app.get('/api/bi/warehouse', authenticateToken, async (req, res) => {
+  try {
+    const [stockSummary] = await pool.execute(`
+      SELECT 
+        COUNT(*) as total_batches,
+        COALESCE(SUM(weight), 0) as total_weight,
+        COUNT(DISTINCT model) as model_count
+      FROM raw_materials
+      WHERE status IN ('in_stock', 'split')
+    `);
+    
+    const [ageDistribution] = await pool.execute(`
+      SELECT 
+        CASE 
+          WHEN DATEDIFF(CURDATE(), DATE(inbound_date)) <= 7 THEN '7天内'
+          WHEN DATEDIFF(CURDATE(), DATE(inbound_date)) <= 30 THEN '30天内'
+          WHEN DATEDIFF(CURDATE(), DATE(inbound_date)) <= 90 THEN '90天内'
+          ELSE '90天以上'
+        END as age_range,
+        COUNT(*) as count,
+        SUM(weight) as weight
+      FROM raw_materials
+      WHERE status IN ('in_stock', 'split')
+      GROUP BY age_range
+    `);
+    
+    const [productDistribution] = await pool.execute(`
+      SELECT 
+        model,
+        COUNT(*) as batch_count,
+        SUM(weight) as weight
+      FROM raw_materials
+      WHERE status IN ('in_stock', 'split')
+      GROUP BY model
+      ORDER BY weight DESC
+      LIMIT 10
+    `);
+    
+    const [inOutTrend] = await pool.execute(`
+      SELECT 
+        DATE(operate_time) as date,
+        operation_type,
+        COUNT(*) as count,
+        SUM(rm.weight) as weight
+      FROM operation_logs ol
+      LEFT JOIN raw_materials rm ON ol.qr_code = rm.qr_code
+      WHERE operate_time >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
+      GROUP BY DATE(operate_time), operation_type
+      ORDER BY date
+    `);
+    
+    const [deadStock] = await pool.execute(`
+      SELECT * FROM raw_materials
+      WHERE status IN ('in_stock', 'split')
+        AND DATEDIFF(CURDATE(), DATE(inbound_date)) > 30
+      ORDER BY inbound_date ASC
+      LIMIT 20
+    `);
+    
+    res.json({
+      code: 0,
+      data: {
+        stockSummary: stockSummary[0],
+        ageDistribution,
+        productDistribution,
+        inOutTrend,
+        deadStock
+      }
+    });
+  } catch (error) {
+    console.error('获取仓储看板数据失败', error);
+    res.status(500).json({ code: 1, message: '获取仓储数据失败' });
+  }
+});
+
+
 app.use(express.static(path.join(__dirname, '../dist')));
 
 // SPA 回退路由 - 所有非 API 路由返回 index.html
@@ -69,6 +349,12 @@ const dbConfig = {
 };
 
 const pool = mysql.createPool(dbConfig);
+
+// 加载生产管理和质检管理路由
+const { setup: productionSetup } = require('./routes/production.js');
+const { setup: qcSetup } = require('./routes/qc.js');
+productionSetup(app, authenticateToken, pool);
+qcSetup(app, authenticateToken, pool);
 
 // 日期格式化函数 - 将UTC时间转换为北京时间
 // production_date: 只返回日期 YYYY-MM-DD
@@ -3398,6 +3684,1229 @@ app.post('/api/wechat-bot/test', authenticateToken, async (req, res) => {
     res.status(500).json({ error: '测试发送失败' });
   }
 });
+
+
+// ==================== CRM客户管理接口 ====================
+
+// 获取客户列表
+app.get('/api/crm/customers', authenticateToken, async (req, res) => {
+  try {
+    const { level, risk, keyword, page = 1, pageSize = 50 } = req.query;
+    let where = '1=1';
+    const params = [];
+    
+    if (level) {
+      where += ' AND customer_level = ?';
+      params.push(level);
+    }
+    if (risk) {
+      where += ' AND churn_risk = ?';
+      params.push(risk);
+    }
+    if (keyword) {
+      where += ' AND (customer_name LIKE ? OR customer_code LIKE ? OR phone LIKE ?)';
+      params.push(`%${keyword}%`, `%${keyword}%`, `%${keyword}%`);
+    }
+    
+    const offset = (parseInt(page) - 1) * parseInt(pageSize);
+    
+    const [rows] = await pool.execute(
+      `SELECT * FROM customers WHERE ${where} ORDER BY rfm_total DESC LIMIT ? OFFSET ?`,
+      [...params, parseInt(pageSize), offset]
+    );
+    
+    const [countResult] = await pool.execute(
+      `SELECT COUNT(*) as total FROM customers WHERE ${where}`,
+      params
+    );
+    
+    res.json({
+      success: true,
+      data: rows,
+      total: countResult[0].total,
+      page: parseInt(page),
+      pageSize: parseInt(pageSize)
+    });
+  } catch (error) {
+    console.error('获取客户列表失败', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 获取单个客户详情
+app.get('/api/crm/customers/:id', authenticateToken, async (req, res) => {
+  try {
+    const [rows] = await pool.execute(
+      'SELECT * FROM customers WHERE id = ?',
+      [req.params.id]
+    );
+    if (rows.length === 0) {
+      return res.status(404).json({ error: '客户不存在' });
+    }
+    res.json({ success: true, data: rows[0] });
+  } catch (error) {
+    console.error('获取客户详情失败', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 创建客户
+app.post('/api/crm/customers', authenticateToken, async (req, res) => {
+  try {
+    const {
+      customer_name, contact_person, phone, address,
+      region, industry, remark
+    } = req.body;
+    
+    if (!customer_name) {
+      return res.status(400).json({ error: '客户名称不能为空' });
+    }
+    
+    const id = uuidv4();
+    const customer_code = 'C' + Date.now().toString(36).toUpperCase();
+    
+    await pool.execute(
+      `INSERT INTO customers (id, customer_code, customer_name, contact_person, phone, address, region, industry, remark)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [id, customer_code, customer_name, contact_person, phone, address, region, industry, remark]
+    );
+    
+    const [rows] = await pool.execute('SELECT * FROM customers WHERE id = ?', [id]);
+    res.json({ success: true, data: rows[0] });
+  } catch (error) {
+    console.error('创建客户失败', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 更新客户
+app.put('/api/crm/customers/:id', authenticateToken, async (req, res) => {
+  try {
+    const {
+      customer_name, contact_person, phone, address,
+      region, industry, remark, status
+    } = req.body;
+    
+    await pool.execute(
+      `UPDATE customers SET 
+        customer_name = COALESCE(?, customer_name),
+        contact_person = COALESCE(?, contact_person),
+        phone = COALESCE(?, phone),
+        address = COALESCE(?, address),
+        region = COALESCE(?, region),
+        industry = COALESCE(?, industry),
+        remark = COALESCE(?, remark),
+        status = COALESCE(?, status)
+       WHERE id = ?`,
+      [customer_name, contact_person, phone, address, region, industry, remark, status, req.params.id]
+    );
+    
+    const [rows] = await pool.execute('SELECT * FROM customers WHERE id = ?', [req.params.id]);
+    res.json({ success: true, data: rows[0] });
+  } catch (error) {
+    console.error('更新客户失败', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 删除客户
+app.delete('/api/crm/customers/:id', authenticateToken, async (req, res) => {
+  try {
+    await pool.execute('DELETE FROM customers WHERE id = ?', [req.params.id]);
+    res.json({ success: true, message: '删除成功' });
+  } catch (error) {
+    console.error('删除客户失败', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 计算RFM分级
+app.post('/api/crm/rfm/calculate', authenticateToken, async (req, res) => {
+  try {
+    // 从shipping_lists获取订单数据
+    const [orders] = await pool.execute(`
+      SELECT 
+        customer_name,
+        COUNT(*) as order_count,
+        SUM(actual_amount) as total_amount,
+        MIN(shipping_date) as first_order,
+        MAX(shipping_date) as last_order
+      FROM shipping_lists
+      WHERE customer_name IS NOT NULL AND customer_name != '' AND status = 'completed'
+      GROUP BY customer_name
+    `);
+    
+    const today = new Date();
+    const updated = [];
+    
+    for (const row of orders) {
+      if (!row.customer_name) continue;
+      
+      const lastOrder = row.last_order ? new Date(row.last_order) : null;
+      const daysSinceLast = lastOrder ? Math.floor((today.getTime() - lastOrder.getTime()) / (1000 * 60 * 60 * 24)) : 999;
+      
+      // R分数（越近越高）
+      let rScore = 3;
+      if (daysSinceLast <= 30) rScore = 5;
+      else if (daysSinceLast <= 90) rScore = 4;
+      else if (daysSinceLast <= 180) rScore = 3;
+      else if (daysSinceLast <= 365) rScore = 2;
+      else rScore = 1;
+      
+      // F分数（越多越高）
+      let fScore = 3;
+      if (row.order_count >= 20) fScore = 5;
+      else if (row.order_count >= 10) fScore = 4;
+      else if (row.order_count >= 5) fScore = 3;
+      else if (row.order_count >= 2) fScore = 2;
+      else fScore = 1;
+      
+      // M分数（越高越高）
+      const avgAmount = row.total_amount / row.order_count;
+      let mScore = 3;
+      if (avgAmount >= 50000) mScore = 5;
+      else if (avgAmount >= 20000) mScore = 4;
+      else if (avgAmount >= 10000) mScore = 3;
+      else if (avgAmount >= 5000) mScore = 2;
+      else mScore = 1;
+      
+      // 计算分级
+      const rfmTotal = rScore * 100 + fScore * 10 + mScore;
+      let level = '一般价值客户';
+      if (rScore >= 3 && fScore >= 3 && mScore >= 3) level = '重要保持客户';
+      else if (rScore >= 3 && fScore < 3 && mScore >= 3) level = '重要发展客户';
+      else if (rScore < 3 && fScore >= 3 && mScore >= 3) level = '重要挽留客户';
+      else if (rScore >= 3 && fScore >= 3 && mScore < 3) level = '重要保护客户';
+      else if (rScore < 3 && fScore < 3 && mScore >= 3) level = '一般挽留客户';
+      else if (rScore >= 3 && fScore < 3 && mScore < 3) level = '一般发展客户';
+      else if (rScore < 3 && fScore >= 3 && mScore < 3) level = '一般保持客户';
+      
+      // 流失风险
+      let churnRisk = 'low';
+      if (daysSinceLast > 180) churnRisk = 'high';
+      else if (daysSinceLast > 90) churnRisk = 'medium';
+      
+      // CLV估算
+      const clv = (row.total_amount / 12) * 12 * 5 * 0.3;
+      
+      // 更新数据库
+      await pool.execute(`
+        UPDATE customers SET 
+          r_score = ?, f_score = ?, m_score = ?,
+          rfm_total = ?, customer_level = ?,
+          total_order_count = ?, total_order_amount = ?,
+          avg_order_amount = ?, last_order_date = ?,
+          clv = ?, churn_risk = ?,
+          first_order_date = COALESCE(first_order_date, ?)
+        WHERE customer_name = ?
+      `, [rScore, fScore, mScore, rfmTotal, level,
+          row.order_count, row.total_amount, avgAmount, row.last_order,
+          clv, churnRisk, row.first_order, row.customer_name]);
+      
+      updated.push({ name: row.customer_name, level, rScore, fScore, mScore });
+    }
+    
+    res.json({ success: true, updated: updated.length, data: updated });
+  } catch (error) {
+    console.error('RFM计算失败', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 获取RFM分布统计
+app.get('/api/crm/rfm/distribution', authenticateToken, async (req, res) => {
+  try {
+    const [rows] = await pool.execute(`
+      SELECT customer_level, COUNT(*) as count, 
+             SUM(total_order_amount) as total_amount
+      FROM customers
+      WHERE customer_level IS NOT NULL
+      GROUP BY customer_level
+    `);
+    
+    const [totals] = await pool.execute(`
+      SELECT COUNT(*) as total, SUM(total_order_amount) as amount
+      FROM customers
+    `);
+    
+    res.json({
+      success: true,
+      data: rows,
+      totals: totals[0]
+    });
+  } catch (error) {
+    console.error('获取RFM分布失败', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 客户流失预警列表
+app.get('/api/crm/churn/warning', authenticateToken, async (req, res) => {
+  try {
+    const [rows] = await pool.execute(`
+      SELECT * FROM customers 
+      WHERE churn_risk = 'high' AND status = 'active'
+      ORDER BY last_order_date ASC
+      LIMIT 50
+    `);
+    res.json({ success: true, data: rows });
+  } catch (error) {
+    console.error('获取流失预警失败', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 客户跟进记录
+app.get('/api/crm/followups/:customerId', authenticateToken, async (req, res) => {
+  try {
+    const [rows] = await pool.execute(
+      'SELECT * FROM customer_followups WHERE customer_id = ? ORDER BY followup_date DESC',
+      [req.params.customerId]
+    );
+    res.json({ success: true, data: rows });
+  } catch (error) {
+    console.error('获取跟进记录失败', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 添加跟进记录
+app.post('/api/crm/followups', authenticateToken, async (req, res) => {
+  try {
+    const { customer_id, followup_type, content, next_followup_date } = req.body;
+    
+    if (!customer_id || !content) {
+      return res.status(400).json({ error: '客户ID和跟进内容不能为空' });
+    }
+    
+    const id = uuidv4();
+    await pool.execute(
+      `INSERT INTO customer_followups (id, customer_id, followup_type, content, next_followup_date, followup_by, followup_date)
+       VALUES (?, ?, ?, ?, ?, ?, NOW())`,
+      [id, customer_id, followup_type || 'call', content, next_followup_date, req.user.id]
+    );
+    
+    res.json({ success: true, message: '跟进记录已添加' });
+  } catch (error) {
+    console.error('添加跟进记录失败', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// CRM看板数据
+app.get('/api/crm/dashboard', authenticateToken, async (req, res) => {
+  try {
+    // 客户总数
+    const [total] = await pool.execute('SELECT COUNT(*) as count FROM customers');
+    
+    // 各分级统计
+    const [levelStats] = await pool.execute(`
+      SELECT customer_level, COUNT(*) as count 
+      FROM customers GROUP BY customer_level
+    `);
+    
+    // 流失风险统计
+    const [riskStats] = await pool.execute(`
+      SELECT churn_risk, COUNT(*) as count FROM customers GROUP BY churn_risk
+    `);
+    
+    // TOP10高价值客户
+    const [topClients] = await pool.execute(`
+      SELECT customer_name, clv, total_order_amount, total_order_count
+      FROM customers ORDER BY clv DESC LIMIT 10
+    `);
+    
+    // 近30天新增客户
+    const [newClients] = await pool.execute(`
+      SELECT COUNT(*) as count FROM customers 
+      WHERE created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)
+    `);
+    
+    res.json({
+      success: true,
+      data: {
+        total: total[0].count,
+        levelStats,
+        riskStats,
+        topClients,
+        newClients: newClients[0].count
+      }
+    });
+  } catch (error) {
+    console.error('获取CRM看板失败', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+
+
+// ==================== MES生产执行系统接口 ====================
+
+// ==================== 产线管理 ====================
+
+// 获取产线列表
+app.get('/api/mes/lines', authenticateToken, async (req, res) => {
+  try {
+    const [rows] = await pool.execute(`
+      SELECT pl.*, 
+        (SELECT COUNT(*) FROM work_orders wo WHERE wo.line_id = pl.id AND wo.status = 'in_progress') as active_orders
+      FROM production_lines pl
+      ORDER BY pl.line_code
+    `);
+    res.json({ success: true, data: rows });
+  } catch (error) {
+    console.error('获取产线列表失败', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 获取单个产线
+app.get('/api/mes/lines/:id', authenticateToken, async (req, res) => {
+  try {
+    const [rows] = await pool.execute(
+      'SELECT * FROM production_lines WHERE id = ?',
+      [req.params.id]
+    );
+    if (rows.length === 0) {
+      return res.status(404).json({ error: '产线不存在' });
+    }
+    res.json({ success: true, data: rows[0] });
+  } catch (error) {
+    console.error('获取产线详情失败', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 新增产线
+app.post('/api/mes/lines', authenticateToken, async (req, res) => {
+  try {
+    const { line_name, line_type, location, min_grammage, max_grammage, min_width, max_width, capacity_per_hour } = req.body;
+    
+    if (!line_name) {
+      return res.status(400).json({ error: '产线名称不能为空' });
+    }
+    
+    const id = require('crypto').randomUUID();
+    const line_code = 'L' + Date.now().toString(36).toUpperCase();
+    
+    await pool.execute(`
+      INSERT INTO production_lines (id, line_code, line_name, line_type, location, min_grammage, max_grammage, min_width, max_width, capacity_per_hour)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `, [id, line_code, line_name, line_type, location, min_grammage || 0, max_grammage || 999, min_width || 0, max_width || 9999, capacity_per_hour || 1]);
+    
+    const [rows] = await pool.execute('SELECT * FROM production_lines WHERE id = ?', [id]);
+    res.json({ success: true, data: rows[0] });
+  } catch (error) {
+    console.error('新增产线失败', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 更新产线
+app.put('/api/mes/lines/:id', authenticateToken, async (req, res) => {
+  try {
+    const { line_name, line_type, location, min_grammage, max_grammage, min_width, max_width, capacity_per_hour, status } = req.body;
+    
+    await pool.execute(`
+      UPDATE production_lines SET 
+        line_name = COALESCE(?, line_name),
+        line_type = COALESCE(?, line_type),
+        location = COALESCE(?, location),
+        min_grammage = COALESCE(?, min_grammage),
+        max_grammage = COALESCE(?, max_grammage),
+        min_width = COALESCE(?, min_width),
+        max_width = COALESCE(?, max_width),
+        capacity_per_hour = COALESCE(?, capacity_per_hour),
+        status = COALESCE(?, status)
+      WHERE id = ?
+    `, [line_name, line_type, location, min_grammage, max_grammage, min_width, max_width, capacity_per_hour, status, req.params.id]);
+    
+    const [rows] = await pool.execute('SELECT * FROM production_lines WHERE id = ?', [req.params.id]);
+    res.json({ success: true, data: rows[0] });
+  } catch (error) {
+    console.error('更新产线失败', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 删除产线
+app.delete('/api/mes/lines/:id', authenticateToken, async (req, res) => {
+  try {
+    await pool.execute('DELETE FROM production_lines WHERE id = ?', [req.params.id]);
+    res.json({ success: true, message: '删除成功' });
+  } catch (error) {
+    console.error('删除产线失败', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 产线统计
+app.get('/api/mes/lines/:id/stats', authenticateToken, async (req, res) => {
+  try {
+    const lineId = req.params.id;
+    
+    // 获取产线信息
+    const [line] = await pool.execute('SELECT * FROM production_lines WHERE id = ?', [lineId]);
+    if (line.length === 0) {
+      return res.status(404).json({ error: '产线不存在' });
+    }
+    
+    // 获取今日产量
+    const today = new Date().toISOString().split('T')[0];
+    const [todayOutput] = await pool.execute(`
+      SELECT COALESCE(SUM(qualified_qty), 0) as output
+      FROM finished_products fp
+      JOIN work_orders wo ON fp.work_order_id = wo.id
+      WHERE wo.line_id = ? AND DATE(fp.produced_at) = ?
+    `, [lineId, today]);
+    
+    // 获取本月产量
+    const monthStart = today.substring(0, 7) + '-01';
+    const [monthOutput] = await pool.execute(`
+      SELECT COALESCE(SUM(qualified_qty), 0) as output
+      FROM finished_products fp
+      JOIN work_orders wo ON fp.work_order_id = wo.id
+      WHERE wo.line_id = ? AND DATE(fp.produced_at) >= ?
+    `, [lineId, monthStart]);
+    
+    // 获取OEE趋势（最近7天）
+    const [oeeTrend] = await pool.execute(`
+      SELECT shift_date, oee, availability, performance, quality
+      FROM oee_records
+      WHERE line_id = ?
+      ORDER BY shift_date DESC
+      LIMIT 7
+    `, [lineId]);
+    
+    // 获取当前运行工单
+    const [currentOrder] = await pool.execute(`
+      SELECT wo.*, p.product_name
+      FROM work_orders wo
+      JOIN products p ON wo.product_id = p.id
+      WHERE wo.line_id = ? AND wo.status = 'in_progress'
+      ORDER BY wo.priority DESC
+      LIMIT 1
+    `, [lineId]);
+    
+    res.json({
+      success: true,
+      data: {
+        line: line[0],
+        todayOutput: todayOutput[0].output,
+        monthOutput: monthOutput[0].output,
+        oeeTrend: oeeTrend.reverse(),
+        currentOrder: currentOrder[0] || null
+      }
+    });
+  } catch (error) {
+    console.error('获取产线统计失败', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// ==================== 设备管理 ====================
+
+// 获取设备列表
+app.get('/api/mes/equipment', authenticateToken, async (req, res) => {
+  try {
+    const { line_id, status } = req.query;
+    let where = '1=1';
+    const params = [];
+    
+    if (line_id) {
+      where += ' AND e.line_id = ?';
+      params.push(line_id);
+    }
+    if (status) {
+      where += ' AND e.status = ?';
+      params.push(status);
+    }
+    
+    const [rows] = await pool.execute(`
+      SELECT e.*, pl.line_name
+      FROM equipment e
+      LEFT JOIN production_lines pl ON e.line_id = pl.id
+      WHERE ${where}
+      ORDER BY e.equipment_code
+    `, params);
+    
+    res.json({ success: true, data: rows });
+  } catch (error) {
+    console.error('获取设备列表失败', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 获取单个设备
+app.get('/api/mes/equipment/:id', authenticateToken, async (req, res) => {
+  try {
+    const [rows] = await pool.execute(`
+      SELECT e.*, pl.line_name
+      FROM equipment e
+      LEFT JOIN production_lines pl ON e.line_id = pl.id
+      WHERE e.id = ?
+    `, [req.params.id]);
+    
+    if (rows.length === 0) {
+      return res.status(404).json({ error: '设备不存在' });
+    }
+    res.json({ success: true, data: rows[0] });
+  } catch (error) {
+    console.error('获取设备详情失败', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 新增设备
+app.post('/api/mes/equipment', authenticateToken, async (req, res) => {
+  try {
+    const { equipment_name, equipment_type, line_id, model, manufacturer, serial_number, purchase_date, rated_power, rated_current, theoretical_capacity } = req.body;
+    
+    if (!equipment_name) {
+      return res.status(400).json({ error: '设备名称不能为空' });
+    }
+    
+    const id = require('crypto').randomUUID();
+    const equipment_code = 'E' + Date.now().toString(36).toUpperCase();
+    
+    await pool.execute(`
+      INSERT INTO equipment (id, equipment_code, equipment_name, equipment_type, line_id, model, manufacturer, serial_number, purchase_date, rated_power, rated_current, theoretical_capacity)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `, [id, equipment_code, equipment_name, equipment_type, line_id, model, manufacturer, serial_number, purchase_date, rated_power, rated_current, theoretical_capacity]);
+    
+    const [rows] = await pool.execute('SELECT * FROM equipment WHERE id = ?', [id]);
+    res.json({ success: true, data: rows[0] });
+  } catch (error) {
+    console.error('新增设备失败', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 更新设备
+app.put('/api/mes/equipment/:id', authenticateToken, async (req, res) => {
+  try {
+    const { equipment_name, equipment_type, line_id, model, manufacturer, serial_number, purchase_date, rated_power, rated_current, theoretical_capacity, status } = req.body;
+    
+    await pool.execute(`
+      UPDATE equipment SET 
+        equipment_name = COALESCE(?, equipment_name),
+        equipment_type = COALESCE(?, equipment_type),
+        line_id = COALESCE(?, line_id),
+        model = COALESCE(?, model),
+        manufacturer = COALESCE(?, manufacturer),
+        serial_number = COALESCE(?, serial_number),
+        purchase_date = COALESCE(?, purchase_date),
+        rated_power = COALESCE(?, rated_power),
+        rated_current = COALESCE(?, rated_current),
+        theoretical_capacity = COALESCE(?, theoretical_capacity),
+        status = COALESCE(?, status)
+      WHERE id = ?
+    `, [equipment_name, equipment_type, line_id, model, manufacturer, serial_number, purchase_date, rated_power, rated_current, theoretical_capacity, status, req.params.id]);
+    
+    const [rows] = await pool.execute('SELECT * FROM equipment WHERE id = ?', [req.params.id]);
+    res.json({ success: true, data: rows[0] });
+  } catch (error) {
+    console.error('更新设备失败', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 删除设备
+app.delete('/api/mes/equipment/:id', authenticateToken, async (req, res) => {
+  try {
+    await pool.execute('DELETE FROM equipment WHERE id = ?', [req.params.id]);
+    res.json({ success: true, message: '删除成功' });
+  } catch (error) {
+    console.error('删除设备失败', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// ==================== 设备维修 ====================
+
+// 获取维修记录列表
+app.get('/api/mes/repairs', authenticateToken, async (req, res) => {
+  try {
+    const { equipment_id, status, page = 1, pageSize = 20 } = req.query;
+    let where = '1=1';
+    const params = [];
+    
+    if (equipment_id) {
+      where += ' AND er.equipment_id = ?';
+      params.push(equipment_id);
+    }
+    if (status) {
+      where += ' AND er.status = ?';
+      params.push(status);
+    }
+    
+    const offset = (parseInt(page) - 1) * parseInt(pageSize);
+    
+    const [rows] = await pool.execute(`
+      SELECT er.*, e.equipment_name, e.equipment_code
+      FROM equipment_repair er
+      JOIN equipment e ON er.equipment_id = e.id
+      WHERE ${where}
+      ORDER BY er.created_at DESC
+      LIMIT ? OFFSET ?
+    `, [...params, parseInt(pageSize), offset]);
+    
+    const [countResult] = await pool.execute(
+      `SELECT COUNT(*) as total FROM equipment_repair er WHERE ${where}`,
+      params
+    );
+    
+    res.json({
+      success: true,
+      data: rows,
+      total: countResult[0].total,
+      page: parseInt(page),
+      pageSize: parseInt(pageSize)
+    });
+  } catch (error) {
+    console.error('获取维修记录失败', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 创建维修记录
+app.post('/api/mes/repairs', authenticateToken, async (req, res) => {
+  try {
+    const { equipment_id, repair_type, fault_type, fault_description, reporter } = req.body;
+    
+    if (!equipment_id || !fault_description) {
+      return res.status(400).json({ error: '设备ID和故障描述不能为空' });
+    }
+    
+    const id = require('crypto').randomUUID();
+    const now = new Date();
+    
+    await pool.execute(`
+      INSERT INTO equipment_repair (id, equipment_id, repair_type, fault_type, fault_description, reporter, reported_at, status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')
+    `, [id, equipment_id, repair_type || 'fault', fault_type, fault_description, reporter, now]);
+    
+    // 更新设备状态为维修中
+    await pool.execute('UPDATE equipment SET status = "repairing" WHERE id = ?', [equipment_id]);
+    
+    const [rows] = await pool.execute(`
+      SELECT er.*, e.equipment_name 
+      FROM equipment_repair er
+      JOIN equipment e ON er.equipment_id = e.id
+      WHERE er.id = ?
+    `, [id]);
+    
+    res.json({ success: true, data: rows[0] });
+  } catch (error) {
+    console.error('创建维修记录失败', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 完成维修
+app.post('/api/mes/repairs/:id/complete', authenticateToken, async (req, res) => {
+  try {
+    const { repairman, spare_parts_used, feedback, result } = req.body;
+    const now = new Date();
+    
+    // 获取维修记录
+    const [repair] = await pool.execute('SELECT * FROM equipment_repair WHERE id = ?', [req.params.id]);
+    if (repair.length === 0) {
+      return res.status(404).json({ error: '维修记录不存在' });
+    }
+    
+    const repairRecord = repair[0];
+    const durationMinutes = repairRecord.reported_at 
+      ? Math.round((now.getTime() - new Date(repairRecord.reported_at).getTime()) / 60000)
+      : 0;
+    
+    await pool.execute(`
+      UPDATE equipment_repair SET 
+        status = 'completed',
+        completed_at = ?,
+        duration_minutes = ?,
+        repairman = ?,
+        spare_parts_used = ?,
+        feedback = ?,
+        result = ?
+      WHERE id = ?
+    `, [now, durationMinutes, repairman, spare_parts_used, feedback, result || 'completed', req.params.id]);
+    
+    // 恢复设备状态
+    await pool.execute('UPDATE equipment SET status = "idle" WHERE id = ?', [repairRecord.equipment_id]);
+    
+    res.json({ success: true, message: '维修完成' });
+  } catch (error) {
+    console.error('完成维修失败', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// ==================== 设备保养 ====================
+
+// 获取保养计划列表
+app.get('/api/mes/maintenance', authenticateToken, async (req, res) => {
+  try {
+    const { equipment_id, status } = req.query;
+    let where = '1=1';
+    const params = [];
+    
+    if (equipment_id) {
+      where += ' AND em.equipment_id = ?';
+      params.push(equipment_id);
+    }
+    if (status) {
+      where += ' AND em.status = ?';
+      params.push(status);
+    }
+    
+    const [rows] = await pool.execute(`
+      SELECT em.*, e.equipment_name, e.equipment_code
+      FROM equipment_maintenance em
+      JOIN equipment e ON em.equipment_id = e.id
+      WHERE ${where}
+      ORDER BY em.plan_date ASC
+    `, params);
+    
+    res.json({ success: true, data: rows });
+  } catch (error) {
+    console.error('获取保养计划失败', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 创建保养计划
+app.post('/api/mes/maintenance', authenticateToken, async (req, res) => {
+  try {
+    const { equipment_id, maintenance_type, plan_date, interval_days, maintenance_content, estimated_minutes, responsible_person } = req.body;
+    
+    if (!equipment_id || !plan_date) {
+      return res.status(400).json({ error: '设备ID和计划日期不能为空' });
+    }
+    
+    const id = require('crypto').randomUUID();
+    
+    await pool.execute(`
+      INSERT INTO equipment_maintenance (id, equipment_id, maintenance_type, plan_date, interval_days, maintenance_content, estimated_minutes, responsible_person)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `, [id, equipment_id, maintenance_type || 'regular', plan_date, interval_days || 30, maintenance_content, estimated_minutes || 60, responsible_person]);
+    
+    const [rows] = await pool.execute(`
+      SELECT em.*, e.equipment_name 
+      FROM equipment_maintenance em
+      JOIN equipment e ON em.equipment_id = e.id
+      WHERE em.id = ?
+    `, [id]);
+    
+    res.json({ success: true, data: rows[0] });
+  } catch (error) {
+    console.error('创建保养计划失败', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 执行保养
+app.post('/api/mes/maintenance/:id/execute', authenticateToken, async (req, res) => {
+  try {
+    const { executor, actual_minutes, result } = req.body;
+    const now = new Date();
+    
+    await pool.execute(`
+      UPDATE equipment_maintenance SET 
+        status = 'completed',
+        actual_date = ?,
+        actual_minutes = ?,
+        executor = ?,
+        result = ?
+      WHERE id = ?
+    `, [now.toISOString().split('T')[0], actual_minutes, executor, result, req.params.id]);
+    
+    res.json({ success: true, message: '保养执行完成' });
+  } catch (error) {
+    console.error('执行保养失败', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// ==================== OEE记录 ====================
+
+// 获取OEE记录
+app.get('/api/mes/oee', authenticateToken, async (req, res) => {
+  try {
+    const { line_id, start_date, end_date, page = 1, pageSize = 30 } = req.query;
+    let where = '1=1';
+    const params = [];
+    
+    if (line_id) {
+      where += ' AND o.line_id = ?';
+      params.push(line_id);
+    }
+    if (start_date) {
+      where += ' AND o.shift_date >= ?';
+      params.push(start_date);
+    }
+    if (end_date) {
+      where += ' AND o.shift_date <= ?';
+      params.push(end_date);
+    }
+    
+    const offset = (parseInt(page) - 1) * parseInt(pageSize);
+    
+    const [rows] = await pool.execute(`
+      SELECT o.*, pl.line_name
+      FROM oee_records o
+      LEFT JOIN production_lines pl ON o.line_id = pl.id
+      WHERE ${where}
+      ORDER BY o.shift_date DESC
+      LIMIT ? OFFSET ?
+    `, [...params, parseInt(pageSize), offset]);
+    
+    const [countResult] = await pool.execute(
+      `SELECT COUNT(*) as total FROM oee_records o WHERE ${where}`,
+      params
+    );
+    
+    res.json({
+      success: true,
+      data: rows,
+      total: countResult[0].total
+    });
+  } catch (error) {
+    console.error('获取OEE记录失败', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 记录OEE数据
+app.post('/api/mes/oee', authenticateToken, async (req, res) => {
+  try {
+    const {
+      line_id, work_order_id, shift_date, shift_type,
+      calendar_minutes, planned_downtime, unplanned_downtime,
+      theoretical_output, actual_output, qualified_output,
+      downtime_reasons
+    } = req.body;
+    
+    if (!line_id || !shift_date) {
+      return res.status(400).json({ error: '产线ID和日期不能为空' });
+    }
+    
+    const id = require('crypto').randomUUID();
+    
+    // 计算OEE
+    const loadMinutes = calendar_minutes - planned_downtime;
+    const effectiveMinutes = loadMinutes - unplanned_downtime;
+    const availability = loadMinutes > 0 ? effectiveMinutes / loadMinutes : 0;
+    const performance = theoretical_output > 0 ? actual_output / theoretical_output : 0;
+    const quality = actual_output > 0 ? qualified_output / actual_output : 0;
+    const oee = availability * performance * quality;
+    
+    await pool.execute(`
+      INSERT INTO oee_records (id, line_id, work_order_id, shift_date, shift_type,
+        calendar_minutes, planned_downtime, unplanned_downtime, load_minutes, effective_minutes,
+        theoretical_output, actual_output, qualified_output,
+        availability, performance, quality, oee, downtime_reasons)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `, [id, line_id, work_order_id, shift_date, shift_type || 'day',
+        calendar_minutes || 720, planned_downtime || 0, unplanned_downtime || 0,
+        loadMinutes, effectiveMinutes, theoretical_output || 0, actual_output || 0, qualified_output || 0,
+        availability, performance, quality, oee, JSON.stringify(downtime_reasons || {})]);
+    
+    // 更新产线统计
+    await pool.execute(`
+      UPDATE production_lines SET 
+        total_production = total_production + ?,
+        total_working_hours = total_working_hours + ?
+      WHERE id = ?
+    `, [qualified_output || 0, effectiveMinutes / 60, line_id]);
+    
+    res.json({ success: true, message: 'OEE记录成功' });
+  } catch (error) {
+    console.error('记录OEE失败', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// OEE看板数据
+app.get('/api/mes/oee/dashboard', authenticateToken, async (req, res) => {
+  try {
+    const today = new Date().toISOString().split('T')[0];
+    const monthStart = today.substring(0, 7) + '-01';
+    
+    // 今日各产线OEE
+    const [todayOEE] = await pool.execute(`
+      SELECT pl.id, pl.line_name,
+        COALESCE(AVG(o.oee), 0) as avg_oee,
+        COALESCE(SUM(o.actual_output), 0) as output
+      FROM production_lines pl
+      LEFT JOIN oee_records o ON pl.id = o.line_id AND o.shift_date = ?
+      GROUP BY pl.id, pl.line_name
+    `, [today]);
+    
+    // 本月平均OEE趋势
+    const [monthTrend] = await pool.execute(`
+      SELECT shift_date, AVG(oee) as avg_oee
+      FROM oee_records
+      WHERE shift_date >= ?
+      GROUP BY shift_date
+      ORDER BY shift_date
+    `, [monthStart]);
+    
+    // OEE分布统计
+    const [oeeDistribution] = await pool.execute(`
+      SELECT 
+        CASE 
+          WHEN oee >= 0.85 THEN 'excellent'
+          WHEN oee >= 0.70 THEN 'good'
+          WHEN oee >= 0.50 THEN 'fair'
+          ELSE 'poor'
+        END as grade,
+        COUNT(*) as count
+      FROM oee_records
+      WHERE shift_date >= ?
+      GROUP BY grade
+    `, [monthStart]);
+    
+    // TOP产线
+    const [topLines] = await pool.execute(`
+      SELECT pl.line_name, AVG(o.oee) as avg_oee, SUM(o.qualified_output) as output
+      FROM oee_records o
+      JOIN production_lines pl ON o.line_id = pl.id
+      WHERE o.shift_date >= ?
+      GROUP BY pl.id, pl.line_name
+      ORDER BY avg_oee DESC
+      LIMIT 5
+    `, [monthStart]);
+    
+    res.json({
+      success: true,
+      data: {
+        todayOEE,
+        monthTrend,
+        oeeDistribution,
+        topLines
+      }
+    });
+  } catch (error) {
+    console.error('获取OEE看板失败', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// ==================== 能源管理 ====================
+
+// 获取能源计量器具
+app.get('/api/mes/energy/meters', authenticateToken, async (req, res) => {
+  try {
+    const { line_id, meter_type } = req.query;
+    let where = '1=1';
+    const params = [];
+    
+    if (line_id) {
+      where += ' AND em.line_id = ?';
+      params.push(line_id);
+    }
+    if (meter_type) {
+      where += ' AND em.meter_type = ?';
+      params.push(meter_type);
+    }
+    
+    const [rows] = await pool.execute(`
+      SELECT em.*, pl.line_name
+      FROM energy_meters em
+      LEFT JOIN production_lines pl ON em.line_id = pl.id
+      WHERE ${where}
+      ORDER BY em.meter_code
+    `, params);
+    
+    res.json({ success: true, data: rows });
+  } catch (error) {
+    console.error('获取能源计量器具失败', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 新增能源计量器具
+app.post('/api/mes/energy/meters', authenticateToken, async (req, res) => {
+  try {
+    const { meter_name, meter_type, line_id, equipment_id, installation_point } = req.body;
+    
+    if (!meter_name || !meter_type) {
+      return res.status(400).json({ error: '表计名称和类型不能为空' });
+    }
+    
+    const id = require('crypto').randomUUID();
+    const meter_code = 'M' + meter_type.charAt(0).toUpperCase() + Date.now().toString(36).toUpperCase();
+    
+    await pool.execute(`
+      INSERT INTO energy_meters (id, meter_code, meter_type, line_id, equipment_id, installation_point)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `, [id, meter_code, meter_type, line_id, equipment_id, installation_point]);
+    
+    res.json({ success: true, message: '能源计量器具创建成功' });
+  } catch (error) {
+    console.error('创建能源计量器具失败', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 记录能源数据
+app.post('/api/mes/energy/readings', authenticateToken, async (req, res) => {
+  try {
+    const { meter_id, line_id, electricity_kwh, water_m3, gas_m3, production_tons, shift_type } = req.body;
+    
+    const id = require('crypto').randomUUID();
+    const reading_time = new Date();
+    
+    await pool.execute(`
+      INSERT INTO energy_readings (id, meter_id, line_id, reading_time, shift_type, electricity_kwh, water_m3, gas_m3, production_tons)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `, [id, meter_id, line_id, reading_time, shift_type || 'day', electricity_kwh || 0, water_m3 || 0, gas_m3 || 0, production_tons || 0]);
+    
+    // 更新计量器具最后读数时间
+    if (meter_id) {
+      await pool.execute('UPDATE energy_meters SET last_reading_at = ? WHERE id = ?', [reading_time, meter_id]);
+    }
+    
+    res.json({ success: true, message: '能源数据记录成功' });
+  } catch (error) {
+    console.error('记录能源数据失败', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 能源统计数据
+app.get('/api/mes/energy/stats', authenticateToken, async (req, res) => {
+  try {
+    const { line_id, start_date, end_date } = req.query;
+    let where = '1=1';
+    const params = [];
+    
+    if (line_id) {
+      where += ' AND er.line_id = ?';
+      params.push(line_id);
+    }
+    if (start_date) {
+      where += ' AND DATE(er.reading_time) >= ?';
+      params.push(start_date);
+    }
+    if (end_date) {
+      where += ' AND DATE(er.reading_time) <= ?';
+      params.push(end_date);
+    }
+    
+    // 汇总统计
+    const [summary] = await pool.execute(`
+      SELECT 
+        COALESCE(SUM(er.electricity_kwh), 0) as total_electricity,
+        COALESCE(SUM(er.water_m3), 0) as total_water,
+        COALESCE(SUM(er.gas_m3), 0) as total_gas,
+        COALESCE(SUM(er.production_tons), 0) as total_production
+      FROM energy_readings er
+      WHERE ${where}
+    `, params);
+    
+    // 按日统计趋势
+    const [dailyTrend] = await pool.execute(`
+      SELECT 
+        DATE(er.reading_time) as date,
+        SUM(er.electricity_kwh) as electricity,
+        SUM(er.water_m3) as water,
+        SUM(er.gas_m3) as gas,
+        SUM(er.production_tons) as production
+      FROM energy_readings er
+      WHERE ${where}
+      GROUP BY DATE(er.reading_time)
+      ORDER BY date
+    `, params);
+    
+    // 单耗统计
+    const summaryData = summary[0];
+    const totalProduction = summaryData.total_production || 1;
+    const stats = {
+      totalElectricity: summaryData.total_electricity,
+      totalWater: summaryData.total_water,
+      totalGas: summaryData.total_gas,
+      totalProduction: summaryData.total_production,
+      electricityPerTon: (summaryData.total_electricity / totalProduction).toFixed(2),
+      waterPerTon: (summaryData.total_water / totalProduction).toFixed(2),
+      gasPerTon: (summaryData.total_gas / totalProduction).toFixed(2)
+    };
+    
+    res.json({
+      success: true,
+      data: {
+        summary: stats,
+        dailyTrend
+      }
+    });
+  } catch (error) {
+    console.error('获取能源统计失败', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// ==================== MES看板 ====================
+
+// MES综合看板
+app.get('/api/mes/dashboard', authenticateToken, async (req, res) => {
+  try {
+    const today = new Date().toISOString().split('T')[0];
+    
+    // 产线状态
+    const [lineStatus] = await pool.execute(`
+      SELECT pl.id, pl.line_name, pl.status,
+        (SELECT COUNT(*) FROM work_orders wo WHERE wo.line_id = pl.id AND wo.status = 'in_progress') as active_orders
+      FROM production_lines pl
+    `);
+    
+    // 今日生产统计
+    const [todayProduction] = await pool.execute(`
+      SELECT 
+        COUNT(*) as order_count,
+        COALESCE(SUM(fp.weight), 0) as output,
+        COALESCE(SUM(fp.qualified_qty), 0) as qualified
+      FROM finished_products fp
+      WHERE DATE(fp.produced_at) = ?
+    `, [today]);
+    
+    // 设备状态
+    const [equipmentStatus] = await pool.execute(`
+      SELECT status, COUNT(*) as count FROM equipment GROUP BY status
+    `);
+    
+    // 待处理维修单
+    const [pendingRepairs] = await pool.execute(`
+      SELECT COUNT(*) as count FROM equipment_repair WHERE status = 'pending'
+    `);
+    
+    // 待执行保养
+    const [pendingMaintenance] = await pool.execute(`
+      SELECT COUNT(*) as count FROM equipment_maintenance WHERE status = 'pending' AND plan_date <= ?
+    `, [today]);
+    
+    // 最近OEE
+    const [recentOEE] = await pool.execute(`
+      SELECT AVG(oee) as avg_oee FROM oee_records WHERE shift_date = ?
+    `, [today]);
+    
+    res.json({
+      success: true,
+      data: {
+        lineStatus,
+        todayProduction: todayProduction[0],
+        equipmentStatus,
+        pendingRepairs: pendingRepairs[0].count,
+        pendingMaintenance: pendingMaintenance[0].count,
+        recentOEE: recentOEE[0].avg_oee || 0
+      }
+    });
+  } catch (error) {
+    console.error('获取MES看板失败', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
 
 // 启动服务器
 app.listen(PORT, '0.0.0.0', async () => {
