@@ -7,7 +7,6 @@ import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Label } from '@/components/ui/label';
 import { Input } from '@/components/ui/input';
-import { Skeleton } from '@/components/ui/skeleton';
 import { Plus, Edit, Trash2, RefreshCw } from 'lucide-react';
 import { toast } from 'sonner';
 import {
@@ -115,16 +114,16 @@ export default function QcStandardPage() {
           </div>
         </CardHeader>
         <CardContent>
-          <div className="border rounded-md">
+          <div className="table-container">
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>原材料型号</TableHead>
-                  <TableHead>克重偏差下限(g)</TableHead>
-                  <TableHead>克重偏差上限(g)</TableHead>
-                  <TableHead>厚度偏差下限(mm)</TableHead>
-                  <TableHead>厚度偏差上限(mm)</TableHead>
-                  <TableHead>操作</TableHead>
+                  <TableHead className="w-[200px]">原材料型号</TableHead>
+                  <TableHead className="w-[140px]" align="right">克重偏差下限(g)</TableHead>
+                  <TableHead className="w-[140px]" align="right">克重偏差上限(g)</TableHead>
+                  <TableHead className="w-[140px]" align="right">厚度偏差下限(mm)</TableHead>
+                  <TableHead className="w-[140px]" align="right">厚度偏差上限(mm)</TableHead>
+                  <TableHead className="w-[120px]" align="center">操作</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -133,27 +132,27 @@ export default function QcStandardPage() {
                     <TableRow key={i}>
                       {[...Array(6)].map((_, j) => (
                         <TableCell key={j}>
-                          <Skeleton className="h-4 w-full bg-muted" />
+                          <div className="table-skeleton h-4 w-full" />
                         </TableCell>
                       ))}
                     </TableRow>
                   ))
                 ) : standards.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={6} className="text-center text-muted-foreground">
+                    <TableCell colSpan={6} className="h-32 text-center text-muted-foreground">
                       暂无质检标准
                     </TableCell>
                   </TableRow>
                 ) : (
                   standards.map((standard) => (
-                    <TableRow key={standard.id}>
+                    <TableRow key={standard.id} className="table-row-highlight">
                       <TableCell className="font-medium">{standard.material_model}</TableCell>
-                      <TableCell>{standard.weight_tolerance.min}</TableCell>
-                      <TableCell>{standard.weight_tolerance.max}</TableCell>
-                      <TableCell>{standard.thickness_tolerance.min}</TableCell>
-                      <TableCell>{standard.thickness_tolerance.max}</TableCell>
-                      <TableCell>
-                        <div className="flex gap-2">
+                      <TableCell align="right" className="tabular-nums">{standard.weight_tolerance.min}</TableCell>
+                      <TableCell align="right" className="tabular-nums">{standard.weight_tolerance.max}</TableCell>
+                      <TableCell align="right" className="tabular-nums">{standard.thickness_tolerance.min}</TableCell>
+                      <TableCell align="right" className="tabular-nums">{standard.thickness_tolerance.max}</TableCell>
+                      <TableCell align="center">
+                        <div className="flex gap-2 justify-center">
                           <Button onClick={() => handleEdit(standard)} variant="ghost" size="sm">
                             <Edit className="w-4 h-4" />
                           </Button>

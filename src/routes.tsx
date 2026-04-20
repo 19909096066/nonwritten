@@ -3,18 +3,18 @@ import LoginPage from './pages/LoginPage';
 import StockListPage from './pages/stock/StockListPage';
 import StockInPage from './pages/stock/StockInPage';
 import StockOutPage from './pages/stock/StockOutPage';
-import BatchImportPage from './pages/stock/BatchImportPage';
+import StockSplitPage from './pages/stock/StockSplitPage';
+
+import PurchaseSuggestionPage from './pages/stock/PurchaseSuggestionPage';
+import PendingInboundPage from './pages/stock/PendingInboundPage';
 import UsersPage from './pages/UsersPage';
 import QcStandardPage from './pages/qc/QcStandardPage';
 import QcPurchasePage from './pages/qc/QcPurchasePage';
 import QcProductionPage from './pages/qc/QcProductionPage';
 import QcDefectPage from './pages/qc/QcDefectPage';
 import LogsPage from './pages/LogsPage';
-import MobileHomePage from './pages/mobile/MobileHomePage';
-import ScanInPage from './pages/mobile/ScanInPage';
-import ScanOutPage from './pages/mobile/ScanOutPage';
-import ManualQueryPage from './pages/mobile/ManualQueryPage';
-import RecordsPage from './pages/mobile/RecordsPage';
+import ReportCenterPage from './pages/report/ReportCenterPage';
+import WeChatBotPage from './pages/WeChatBotPage';
 import type { ReactNode } from 'react';
 
 interface RouteConfig {
@@ -52,9 +52,20 @@ const routes: RouteConfig[] = [
     element: <StockOutPage />,
   },
   {
-    name: '批量入库',
-    path: '/stock/batch-import',
-    element: <BatchImportPage />,
+    name: '拆包明细',
+    path: '/stock/split',
+    element: <StockSplitPage />,
+  },
+
+  {
+    name: '采购建议',
+    path: '/stock/purchase-suggestion',
+    element: <PurchaseSuggestionPage />,
+  },
+  {
+    name: '待入库明细',
+    path: '/stock/pending-inbound',
+    element: <PendingInboundPage />,
   },
   {
     name: '用户管理',
@@ -86,36 +97,15 @@ const routes: RouteConfig[] = [
     path: '/logs',
     element: <LogsPage />,
   },
-  // 移动端路由
   {
-    name: '移动端首页',
-    path: '/mobile',
-    element: <MobileHomePage />,
-    visible: false,
+    name: '企业微信机器人',
+    path: '/wechat-bot',
+    element: <WeChatBotPage />,
   },
   {
-    name: '扫码入库',
-    path: '/mobile/scan-in',
-    element: <ScanInPage />,
-    visible: false,
-  },
-  {
-    name: '扫码出库',
-    path: '/mobile/scan-out',
-    element: <ScanOutPage />,
-    visible: false,
-  },
-  {
-    name: '手动查询',
-    path: '/mobile/manual-query',
-    element: <ManualQueryPage />,
-    visible: false,
-  },
-  {
-    name: '操作记录',
-    path: '/mobile/records',
-    element: <RecordsPage />,
-    visible: false,
+    name: '报表中心',
+    path: '/report',
+    element: <ReportCenterPage />,
   },
 ];
 

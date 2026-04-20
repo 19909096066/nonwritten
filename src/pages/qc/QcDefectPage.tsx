@@ -1,14 +1,14 @@
 import { useEffect, useState } from 'react';
 import { getQcDefects } from '@/db/api';
 import type { QcDefect } from '@/types';
+import DateQuickSelect from '@/components/common/DateQuickSelect';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Badge } from '@/components/ui/badge';
-import { Skeleton } from '@/components/ui/skeleton';
 import { RefreshCw } from 'lucide-react';
+import { cn } from '@/lib/utils';
 import {
   Pagination,
   PaginationContent,
@@ -28,6 +28,7 @@ export default function QcDefectPage() {
   const [source, setSource] = useState('all');
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
+  const [dateQuickKey, setDateQuickKey] = useState('');
 
   useEffect(() => {
     loadData();
@@ -53,6 +54,12 @@ export default function QcDefectPage() {
   };
 
   const totalPages = Math.ceil(total / pageSize);
+
+  const handleDateQuickSelect = (start: string, end: string) => {
+    setStartDate(start);
+    setEndDate(end);
+    setPage(1);
+  };
 
   return (
     <div className="space-y-4">
@@ -81,15 +88,20 @@ export default function QcDefectPage() {
             <Input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} />
           </div>
 
-          <div className="border rounded-md">
+          <div className="flex items-center gap-2">
+            <span className="text-sm text-muted-foreground">快速选择：</span>
+            <DateQuickSelect onSelect={handleDateQuickSelect} activeKey={dateQuickKey} />
+          </div>
+
+          <div className="table-container">
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>来源</TableHead>
-                  <TableHead>时间</TableHead>
-                  <TableHead>批次号/生产线</TableHead>
-                  <TableHead>包号/产品ID</TableHead>
-                  <TableHead>型号</TableHead>
+                  <TableHead className="w-[120px]" align="center">来源</TableHead>
+                  <TableHead className="w-[160px]" align="center">时间</TableHead>
+                  <TableHead className="w-[140px]" align="center">批次号/生产线</TableHead>
+                  <TableHead className="w-[120px]" align="center">包号/产品ID</TableHead>
+                  <TableHead className="w-[140px]">型号</TableHead>
                   <TableHead>不合格原因</TableHead>
                 </TableRow>
               </TableHeader>
@@ -99,32 +111,35 @@ export default function QcDefectPage() {
                     <TableRow key={i}>
                       {[...Array(6)].map((_, j) => (
                         <TableCell key={j}>
-                          <Skeleton className="h-4 w-full bg-muted" />
+                          <div className="table-skeleton h-4 w-full" />
                         </TableCell>
                       ))}
                     </TableRow>
                   ))
                 ) : defects.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={6} className="text-center text-muted-foreground">
+                    <TableCell colSpan={6} className="h-32 text-center text-muted-foreground">
                       暂无数据
                     </TableCell>
                   </TableRow>
                 ) : (
                   defects.map((defect) => (
-                    <TableRow key={defect.id}>
-                      <TableCell>
-                        <Badge variant={defect.source === 'purchase' ? 'default' : 'secondary'}>
+                    <TableRow key={defect.id} className="table-row-highlight">
+                      <TableCell align="center">
+                        <span className={cn(
+                          "table-status-badge",
+                          defect.source === 'purchase' ? "table-status-info" : "table-status-warning"
+                        )}>
                           {defect.source === 'purchase' ? '采购质检' : '生产质检'}
-                        </Badge>
+                        </span>
                       </TableCell>
-                      <TableCell>{new Date(defect.time).toLocaleString('zh-CN')}</TableCell>
-                      <TableCell>
+                      <TableCell align="center" className="text-slate-500 text-xs whitespace-nowrap">{new Date(defect.time).toLocaleString('zh-CN')}</TableCell>
+                      <TableCell align="center">
                         {defect.source === 'purchase' ? defect.batch_no : `生产线${defect.line}`}
                       </TableCell>
-                      <TableCell className="font-mono">{defect.package_no}</TableCell>
+                      <TableCell align="center" className="font-mono text-xs">{defect.package_no}</TableCell>
                       <TableCell>{defect.material_model || '-'}</TableCell>
-                      <TableCell>{defect.reason}</TableCell>
+                      <TableCell className="text-sm">{defect.reason}</TableCell>
                     </TableRow>
                   ))
                 )}

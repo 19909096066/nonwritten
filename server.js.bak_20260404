@@ -1,0 +1,3411 @@
+// MySQL版本服务器
+const express = require('express');
+const cors = require('cors');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+const { v4: uuidv4 } = require('uuid');
+const mysql = require('mysql2/promise');
+const path = require('path');
+const fs = require('fs');
+
+// 日志配置
+const LOG_DIR = path.join(__dirname, '../logs');
+if (!fs.existsSync(LOG_DIR)) {
+  fs.mkdirSync(LOG_DIR, { recursive: true });
+}
+
+function writeApiLog(action, req, res, extra) {
+  const date = new Date().toISOString().split('T')[0];
+  const timestamp = new Date().toISOString();
+  const user = req.user ? (req.user.name || req.user.phone || 'unknown') : 'anonymous';
+  const ip = req.ip || req.connection.remoteAddress || '-';
+  const logFile = path.join(LOG_DIR, 'api-' + date + '.log');
+  const logMessage = '[' + timestamp + '] [' + action + '] user=' + user + ' ip=' + ip + ' method=' + req.method + ' path=' + req.path + ' status=' + res.statusCode + ' ' + JSON.stringify(extra) + '\n';
+  fs.appendFileSync(logFile, logMessage);
+}
+
+function writeStockLog(action, data) {
+  const date = new Date().toISOString().split('T')[0];
+  const timestamp = new Date().toISOString();
+  const logFile = path.join(LOG_DIR, 'stock-' + date + '.log');
+  const logMessage = '[' + timestamp + '] [' + action + '] ' + JSON.stringify(data) + '\n';
+  fs.appendFileSync(logFile, logMessage);
+}
+
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
+
+// 中间件
+app.use(cors());
+app.use(express.json());
+
+// 静态文件服务 - 服务前端构建产物
+app.use(express.static(path.join(__dirname, '../dist')));
+
+// SPA 回退路由 - 所有非 API 路由返回 index.html
+// 使用正则匹配所有路由，排除 /api 和 /download 开头的路径
+app.get(/^\/(?!api|download).*/, (req, res) => {
+  res.sendFile(path.join(__dirname, '../dist/index.html'), (err) => {
+    if (err) {
+      res.status(500).send('Server Error');
+    }
+  });
+});
+
+// MySQL连接池配置
+const dbConfig = {
+  host: 'gz-cynosdbmysql-grp-g4mz63v7.sql.tencentcdb.com',
+  port: 29477,
+  user: 'root',
+  password: 'Mygbbyy1.',
+  database: 'nonwoven',
+  charset: 'utf8mb4',
+  waitForConnections: true,
+  connectionLimit: 10,
+  queueLimit: 0,
+  dateStrings: true
+};
+
+const pool = mysql.createPool(dbConfig);
+
+// 日期格式化函数 - 将UTC时间转换为北京时间
+// production_date: 只返回日期 YYYY-MM-DD
+// 其他日期: 返回完整的日期时间 YYYY-MM-DD HH:MM:SS（北京时间）
+function formatDateOnly(date) {
+  if (!date) return null;
+  let d;
+  if (typeof date === 'string') {
+    if (date.includes('T')) {
+      // ISO 格式: 2026-02-23T16:00:00.000Z
+      d = new Date(date);
+    } else if (date.includes(' ')) {
+      // 已经是 YYYY-MM-DD HH:MM:SS 格式，只取日期部分
+      return date.split(' ')[0].substring(0, 10);
+    } else {
+      return date.substring(0, 10);
+    }
+  } else if (date instanceof Date) {
+    d = date;
+  } else {
+    return null;
+  }
+  
+  // 转换为北京时间（UTC+8）
+  const beijingTime = new Date(d.getTime() + 8 * 60 * 60 * 1000);
+  const year = beijingTime.getUTCFullYear();
+  const month = String(beijingTime.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(beijingTime.getUTCDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function formatDateTime(date) {
+  if (!date) return null;
+  let d;
+  if (typeof date === 'string') {
+    if (date.includes('T')) {
+      // ISO 格式: 2026-02-23T16:00:00.000Z
+      d = new Date(date);
+    } else if (date.includes(' ')) {
+      // 已经是 YYYY-MM-DD HH:MM:SS 格式，直接返回
+      return date.substring(0, 19);
+    } else {
+      return date;
+    }
+  } else if (date instanceof Date) {
+    d = date;
+  } else {
+    return null;
+  }
+  
+  // 转换为北京时间（UTC+8）
+  const beijingTime = new Date(d.getTime() + 8 * 60 * 60 * 1000);
+  const year = beijingTime.getUTCFullYear();
+  const month = String(beijingTime.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(beijingTime.getUTCDate()).padStart(2, '0');
+  const hours = String(beijingTime.getUTCHours()).padStart(2, '0');
+  const minutes = String(beijingTime.getUTCMinutes()).padStart(2, '0');
+  const seconds = String(beijingTime.getUTCSeconds()).padStart(2, '0');
+  return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
+}
+
+// 格式化物料对象中的日期字段
+function formatMaterialDates(material) {
+  if (!material) return material;
+  return {
+    ...material,
+    production_date: formatDateOnly(material.production_date),
+    out_at: formatDateTime(material.out_at),
+    split_at: formatDateTime(material.split_at),
+    created_at: formatDateTime(material.created_at)
+  };
+}
+
+// JWT验证中间件
+function authenticateToken(req, res, next) {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+
+  if (!token) {
+    return res.status(401).json({ error: '未提供token' });
+  }
+
+  jwt.verify(token, JWT_SECRET, (err, user) => {
+    if (err) {
+      return res.status(403).json({ error: 'token无效' });
+    }
+    req.user = user;
+    next();
+  });
+}
+
+// ==================== 认证接口 ====================
+
+// 登录
+app.post('/api/auth/login', async (req, res) => {
+  const { phone, password } = req.body;
+
+  if (!phone || !password) {
+    return res.status(400).json({ error: '手机号和密码不能为空' });
+  }
+  
+  if (!/^1[3-9]\d{9}$/.test(phone)) {
+    return res.status(400).json({ error: '手机号格式不正确' });
+  }
+  
+  if (password.length < 6 || password.length > 20) {
+    return res.status(400).json({ error: '密码长度需6-20位' });
+  }
+
+  try {
+    const [rows] = await pool.execute('SELECT * FROM users WHERE phone = ?', [phone]);
+    const user = rows[0];
+
+    if (!user) {
+      return res.status(401).json({ error: '用户不存在' });
+    }
+
+    if (user.is_active === 0) {
+      return res.status(403).json({ error: '用户已被停用，请联系管理员' });
+    }
+
+    const validPassword = bcrypt.compareSync(password, user.password);
+    if (!validPassword) {
+      return res.status(401).json({ error: '密码错误' });
+    }
+
+    const token = jwt.sign(
+      { id: user.id, phone: user.phone, role: user.role },
+      JWT_SECRET,
+      { expiresIn: '30d' }
+    );
+
+    res.json({
+      token,
+      user: {
+        id: user.id,
+        username: user.phone,
+        name: user.name,
+        phone: user.phone,
+        role: user.role,
+        is_active: user.is_active !== 0,
+        app_permissions: user.app_permissions ? JSON.parse(user.app_permissions) : null,
+        web_permissions: user.web_permissions ? JSON.parse(user.web_permissions) : null
+      }
+    });
+  } catch (error) {
+    console.error('登录错误:', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 获取用户信息
+app.get('/api/auth/profile', authenticateToken, async (req, res) => {
+  try {
+    const [rows] = await pool.execute('SELECT * FROM users WHERE id = ?', [req.user.id]);
+    const user = rows[0];
+    if (!user) {
+      return res.status(404).json({ error: '用户不存在' });
+    }
+    res.json({ ...user, password: undefined });
+  } catch (error) {
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// ==================== 用户管理接口 ====================
+
+// 获取用户列表
+app.get('/api/users', authenticateToken, async (req, res) => {
+  try {
+    const [rows] = await pool.execute('SELECT id, phone, name, role, is_active, app_permissions, web_permissions, created_at FROM users');
+    const users = rows.map(u => {
+      let appPerms = null;
+      let webPerms = null;
+      try {
+        if (u.app_permissions) appPerms = JSON.parse(u.app_permissions);
+        if (u.web_permissions) webPerms = JSON.parse(u.web_permissions);
+      } catch (e) {
+        console.error('解析权限JSON失败:', e);
+      }
+      return {
+        id: u.id,
+        username: u.phone,
+        name: u.name,
+        phone: u.phone,
+        role: u.role,
+        is_active: u.is_active !== 0,
+        app_permissions: appPerms,
+        web_permissions: webPerms,
+        created_at: formatDateTime(u.created_at)
+      };
+    });
+    res.json(users);
+  } catch (error) {
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 创建用户
+app.post('/api/users', authenticateToken, async (req, res) => {
+  const { phone, name, password, role } = req.body;
+
+  if (!phone || !name || !password) {
+    return res.status(400).json({ error: '缺少必要字段' });
+  }
+
+  try {
+    const [existing] = await pool.execute('SELECT id FROM users WHERE phone = ?', [phone]);
+    if (existing.length > 0) {
+      return res.status(409).json({ error: '手机号已存在' });
+    }
+
+    const id = uuidv4();
+    const hashedPassword = bcrypt.hashSync(password, 10);
+
+    await pool.execute(
+      'INSERT INTO users (id, phone, name, password, role, is_active, created_at) VALUES (?, ?, ?, ?, ?, 1, NOW())',
+      [id, phone, name, hashedPassword, role || 'user']
+    );
+
+    res.status(201).json({ id, phone, name, role: role || 'user' });
+  } catch (error) {
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 更新用户
+app.put('/api/users/:id', authenticateToken, async (req, res) => {
+  const { name, phone, role, is_active, app_permissions, web_permissions } = req.body;
+  const { id } = req.params;
+
+  try {
+    const [rows] = await pool.execute('SELECT * FROM users WHERE id = ?', [id]);
+    if (rows.length === 0) {
+      return res.status(404).json({ error: '用户不存在' });
+    }
+
+    const currentUser = rows[0];
+    
+    // 支持部分更新，只更新传入的字段
+    const updates = [];
+    const values = [];
+    
+    if (name !== undefined) {
+      updates.push('name = ?');
+      values.push(name);
+    }
+    if (phone !== undefined) {
+      // BUG FIX: 检查手机号唯一性（排除当前用户）
+      const [phoneExists] = await pool.execute(
+        'SELECT id FROM users WHERE phone = ? AND id != ?', 
+        [phone, id]
+      );
+      if (phoneExists.length > 0) {
+        return res.status(409).json({ error: '该手机号已被使用' });
+      }
+      updates.push('phone = ?');
+      values.push(phone || '');
+    }
+    if (role !== undefined) {
+      // BUG FIX: 管理员不能把自己改成非管理员
+      if (id === req.user.id && role !== 'admin') {
+        return res.status(400).json({ error: '不能取消自己的管理员权限' });
+      }
+      updates.push('role = ?');
+      values.push(role);
+    }
+    if (is_active !== undefined) {
+      updates.push('is_active = ?');
+      values.push(is_active ? 1 : 0);
+    }
+    if (app_permissions !== undefined) {
+      updates.push('app_permissions = ?');
+      values.push(JSON.stringify(app_permissions));
+    }
+    if (web_permissions !== undefined) {
+      updates.push('web_permissions = ?');
+      values.push(JSON.stringify(web_permissions));
+    }
+    
+    if (updates.length === 0) {
+      return res.json(currentUser);
+    }
+    
+    values.push(id);
+    await pool.execute(
+      `UPDATE users SET ${updates.join(', ')} WHERE id = ?`,
+      values
+    );
+
+    // 获取更新后的用户数据
+    const [updatedRows] = await pool.execute('SELECT * FROM users WHERE id = ?', [id]);
+    const updated = updatedRows[0];
+    
+    // 安全解析权限
+    let appPerms = {};
+    let webPerms = {};
+    try {
+      if (updated.app_permissions) appPerms = JSON.parse(updated.app_permissions);
+      if (updated.web_permissions) webPerms = JSON.parse(updated.web_permissions);
+    } catch (e) {
+      console.error('解析权限JSON失败:', e);
+    }
+    res.json({
+      id: updated.id,
+      name: updated.name,
+      phone: updated.phone,
+      role: updated.role,
+      is_active: updated.is_active !== 0,
+      app_permissions: appPerms,
+      web_permissions: webPerms
+    });
+  } catch (error) {
+    console.error('更新用户失败:', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 删除用户
+app.delete('/api/users/:id', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  
+  try {
+    // BUG FIX: 不能删除自己的账号
+    if (id === req.user.id) {
+      return res.status(400).json({ error: '不能删除自己的账号' });
+    }
+    
+    const [result] = await pool.execute('DELETE FROM users WHERE id = ?', [id]);
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ error: '用户不存在' });
+    }
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// BUG FIX: 添加密码重置接口
+app.put('/api/users/:id/reset-password', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  const { newPassword } = req.body;
+  
+  if (!newPassword || newPassword.length < 6) {
+    return res.status(400).json({ error: '密码至少6位' });
+  }
+  
+  try {
+    const hashedPassword = bcrypt.hashSync(newPassword, 10);
+    await pool.execute('UPDATE users SET password = ? WHERE id = ?', [hashedPassword, id]);
+    
+    // 记录操作日志
+    const [user] = await pool.execute('SELECT name, phone FROM users WHERE id = ?', [id]);
+    if (user.length > 0) {
+      const logId = uuidv4();
+      await pool.execute(
+        'INSERT INTO operation_logs (id, operation_type, operator, operate_time, detail) VALUES (?, ?, ?, NOW(), ?)',
+        [logId, 'USER_EDIT', req.user.phone, `重置用户密码: ${user[0].name} (${user[0].phone})`]
+      );
+    }
+    
+    res.json({ success: true });
+  } catch (error) {
+    console.error('重置密码失败:', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// ==================== 物料管理接口 ====================
+
+// 获取物料列表
+app.get('/api/materials', authenticateToken, async (req, res) => {
+  const { page = 1, pageSize = 20, keyword, status, batchNo, model, startDate, endDate } = req.query;
+  
+  let sql = `SELECT 
+    id, qr_code, batch_no, package_no, model,
+    production_date,
+    weight, unit, status, operator, device, remark,
+    out_at,
+    split_at,
+    split_operator,
+    created_at
+    FROM raw_materials WHERE 1=1`;
+  const params = [];
+
+  if (keyword) {
+    sql += ' AND (batch_no LIKE ? OR model LIKE ?)';
+    params.push(`%${keyword}%`, `%${keyword}%`);
+  }
+
+  if (status) {
+    sql += ' AND status = ?';
+    params.push(status);
+  }
+
+  if (batchNo) {
+    sql += ' AND batch_no = ?';
+    params.push(batchNo);
+  }
+
+  if (model) {
+    sql += ' AND model = ?';
+    params.push(model);
+  }
+
+  if (startDate) {
+    // 根据状态选择日期字段
+    const dateField = status === 'out_stock' ? 'out_at' : (status === 'split' ? 'split_at' : 'created_at');
+    sql += ` AND DATE(${dateField}) >= ?`;
+    params.push(startDate);
+  }
+
+  if (endDate) {
+    const dateField = status === 'out_stock' ? 'out_at' : (status === 'split' ? 'split_at' : 'created_at');
+    sql += ` AND DATE(${dateField}) <= ?`;
+    params.push(endDate);
+  }
+
+  // 获取总数
+  const countSql = 'SELECT COUNT(*) as total FROM raw_materials WHERE 1=1' + sql.substring(sql.indexOf('WHERE 1=1') + 9);
+  const [countRows] = await pool.execute(countSql, params);
+  const total = countRows[0].total;
+
+  // 分页 - 根据状态选择排序字段
+  let orderBy = 'created_at DESC';
+  if (status === 'out_stock') {
+    orderBy = 'out_at DESC';
+  } else if (status === 'split') {
+    orderBy = 'split_at DESC';
+  }
+  sql += ` ORDER BY ${orderBy} LIMIT ? OFFSET ?`;
+  params.push(parseInt(pageSize), (parseInt(page) - 1) * parseInt(pageSize));
+
+  const [rows] = await pool.execute(sql, params);
+  const formattedRows = rows.map(formatMaterialDates);
+  res.json({ data: formattedRows, total });
+});
+
+// 根据二维码获取物料
+app.get('/api/materials/qr/:code', authenticateToken, async (req, res) => {
+  const code = decodeURIComponent(req.params.code);
+  try {
+    const [rows] = await pool.execute(`SELECT 
+      id, qr_code, batch_no, package_no, model,
+      production_date,
+      weight, unit, status, operator, device, remark,
+      out_at,
+      split_at,
+      split_operator,
+      created_at
+      FROM raw_materials WHERE qr_code = ?`, [code]);
+    res.json(formatMaterialDates(rows[0]) || null);
+  } catch (error) {
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 创建物料（入库）
+app.post('/api/materials', authenticateToken, async (req, res) => {
+  const { qr_code, batch_no, package_no, model, production_date, weight, unit, operator, device } = req.body;
+
+  if (!qr_code || !batch_no || !model || !weight) {
+    return res.status(400).json({ error: '缺少必要字段' });
+  }
+
+  try {
+    // 检查是否已存在
+    const [existing] = await pool.execute('SELECT id FROM raw_materials WHERE qr_code = ?', [qr_code]);
+    if (existing.length > 0) {
+      return res.status(409).json({ error: '二维码已存在' });
+    }
+
+    // 提取纯数字包号（处理 qr_code 中的包号格式）
+    let finalPackageNo = package_no || '';
+    if (!finalPackageNo && qr_code) {
+      // 从二维码中提取包号（格式：批号-包号~...）
+      const parts = qr_code.split('~');
+      if (parts.length >= 1) {
+        const firstPart = parts[0];
+        const lastDashIdx = firstPart.lastIndexOf('-');
+        if (lastDashIdx !== -1) {
+          finalPackageNo = firstPart.substring(lastDashIdx + 1);
+        }
+      }
+    }
+
+    const id = uuidv4();
+    await pool.execute(
+      `INSERT INTO raw_materials 
+       (id, qr_code, batch_no, package_no, model, production_date, weight, unit, status, operator, device, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'in_stock', ?, ?, NOW())`,
+      [id, qr_code, batch_no, finalPackageNo, model, production_date, weight, unit || 'kg', operator, device]
+    );
+
+    // 创建操作日志
+    const logId = uuidv4();
+    await pool.execute(
+      `INSERT INTO operation_logs (id, qr_code, operation_type, operator, operate_time, detail, device)
+       VALUES (?, ?, 'IN', ?, NOW(), ?, ?)`,
+      [logId, qr_code, operator, `入库批次: ${batch_no}, 型号: ${model}, 重量: ${weight}kg`, device]
+    );
+
+    // 自动匹配待入库明细
+    try {
+      const [pendingItems] = await pool.execute(
+        `SELECT id, batch_no, package_no FROM shipping_items WHERE status = 'pending'`
+      );
+      
+      for (const item of pendingItems) {
+        const itemBatchNo = (item.batch_no || '').trim();
+        const itemPackageNo = (item.package_no || '').trim();
+        
+        // 匹配条件
+        let matched = false;
+        
+        // 包号必须匹配
+        if (itemPackageNo === finalPackageNo) {
+          // 批号匹配：精确匹配或前缀匹配
+          // 入库批号如 "P0126020013-01J2"，清单批号如 "P0126020013"
+          if (batch_no === itemBatchNo || batch_no.startsWith(itemBatchNo + '-') || itemBatchNo === batch_no.substring(0, itemBatchNo.length)) {
+            matched = true;
+          }
+        }
+        
+        if (matched) {
+          await pool.execute(
+            `UPDATE shipping_items SET status = 'matched', qr_code = ? WHERE id = ?`,
+            [qr_code, item.id]
+          );
+          console.log(`自动匹配成功: 入库批号=${batch_no}, 入库包号=${finalPackageNo}, 清单批号=${itemBatchNo}, 清单包号=${itemPackageNo}`);
+          break;
+        }
+      }
+    } catch (matchError) {
+      console.error('自动匹配失败:', matchError);
+    }
+
+    writeStockLog('STOCK_IN', { qr_code, batch_no, package_no: finalPackageNo, model, weight, operator, device });
+    res.status(201).json({ id, qr_code, batch_no, package_no: finalPackageNo, model, weight, status: 'in_stock' });
+  } catch (error) {
+    console.error('入库错误:', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 物料出库
+app.post('/api/materials/out', authenticateToken, async (req, res) => {
+  const { qrCode, qr_code, operator, device } = req.body;
+  const code = qrCode || qr_code;
+
+  if (!code) {
+    return res.status(400).json({ error: '缺少二维码' });
+  }
+
+  try {
+    // 查找物料
+    const [rows] = await pool.execute(
+      `SELECT 
+        id, qr_code, batch_no, package_no, model,
+        production_date,
+        weight, unit, status, operator, device, remark,
+        out_at,
+        split_at,
+        split_operator,
+        created_at
+        FROM raw_materials WHERE qr_code = ? AND status IN ('in_stock', 'split')`,
+      [code]
+    );
+    
+    if (rows.length === 0) {
+      return res.status(404).json({ error: '物料不存在或已出库' });
+    }
+
+    const material = rows[0];
+
+    // 更新状态
+    await pool.execute(
+      "UPDATE raw_materials SET status = 'out_stock', out_at = NOW(), operator = ?, remark = '已出库', device = ? WHERE id = ?",
+      [operator, device, material.id]
+    );
+
+    // 创建日志
+    const logId = uuidv4();
+    await pool.execute(
+      `INSERT INTO operation_logs (id, qr_code, operation_type, operator, operate_time, detail, device)
+       VALUES (?, ?, 'OUT', ?, NOW(), ?, ?)`,
+      [logId, code, operator, `出库批次: ${material.batch_no}, 型号: ${material.model}, 重量: ${material.weight}kg`, device]
+    );
+
+    const today = new Date().toISOString().split('T')[0];
+    res.json(formatMaterialDates({ ...material, status: 'out_stock', out_at: today }));
+  } catch (error) {
+    console.error('出库错误:', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 物料拆包
+app.post('/api/materials/split', authenticateToken, async (req, res) => {
+  const { qr_code, operator, device } = req.body;
+
+  if (!qr_code) {
+    return res.status(400).json({ error: '缺少二维码' });
+  }
+
+  try {
+    const [rows] = await pool.execute(
+      `SELECT 
+        id, qr_code, batch_no, package_no, model,
+        production_date,
+        weight, unit, status, operator, device, remark,
+        out_at,
+        split_at,
+        split_operator,
+        created_at
+        FROM raw_materials WHERE qr_code = ? AND status = 'in_stock'`,
+      [qr_code]
+    );
+    
+    if (rows.length === 0) {
+      return res.status(404).json({ error: '未找到该物料或状态不是入库' });
+    }
+
+    const material = rows[0];
+
+    await pool.execute(
+      "UPDATE raw_materials SET status = 'split', split_at = NOW(), split_operator = ? WHERE id = ?",
+      [operator, material.id]
+    );
+
+    const logId = uuidv4();
+    await pool.execute(
+      `INSERT INTO operation_logs (id, qr_code, operation_type, operator, operate_time, detail, device)
+       VALUES (?, ?, 'SPLIT', ?, NOW(), ?, ?)`,
+      [logId, qr_code, operator, `拆包: ${material.batch_no}, ${material.model}, ${material.weight}kg`, device]
+    );
+
+    const today = new Date().toISOString().split('T')[0];
+    res.json(formatMaterialDates({ ...material, status: 'split', split_at: today }));
+  } catch (error) {
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 获取批次号列表（必须在 :id 路由之前）
+app.get('/api/materials/batches', authenticateToken, async (req, res) => {
+  try {
+    const [rows] = await pool.execute('SELECT DISTINCT batch_no FROM raw_materials ORDER BY batch_no');
+    res.json(rows.map(r => r.batch_no));
+  } catch (error) {
+    console.error('获取批次号列表失败:', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 获取型号列表（必须在 :id 路由之前）
+app.get('/api/materials/models', authenticateToken, async (req, res) => {
+  try {
+    const [rows] = await pool.execute('SELECT DISTINCT model FROM raw_materials ORDER BY model');
+    res.json(rows.map(r => r.model));
+  } catch (error) {
+    console.error('获取型号列表失败:', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 获取单个物料详情（通过ID）
+app.get('/api/materials/:id', authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const [rows] = await pool.execute(`
+      SELECT id, qr_code, batch_no, package_no, model, production_date, weight, unit, 
+             status, operator, device, remark,
+             out_at, split_at, split_operator, created_at
+      FROM raw_materials WHERE id = ?
+    `, [id]);
+    
+    if (rows.length === 0) {
+      return res.status(404).json({ error: '物料不存在' });
+    }
+    
+    res.json(formatMaterialDates(rows[0]));
+  } catch (error) {
+    console.error('获取物料详情失败:', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// ==================== 操作日志接口 ====================
+
+// 创建操作日志
+app.post('/api/logs', authenticateToken, async (req, res) => {
+  const { qr_code, operation_type, operator, operate_time, detail, device } = req.body;
+  
+  const logId = uuidv4();
+  try {
+    await pool.execute(
+      `INSERT INTO operation_logs (id, qr_code, operation_type, operator, operate_time, detail, device)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [logId, qr_code || null, operation_type, operator, operate_time || new Date(), detail || null, device || 'PC']
+    );
+    res.json({ id: logId, qr_code, operation_type, operator, operate_time, detail, device });
+  } catch (error) {
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 获取日志列表
+app.get('/api/logs', authenticateToken, async (req, res) => {
+  const { page = 1, pageSize = 20, operationType, operator, startDate, endDate } = req.query;
+  
+  let sql = 'SELECT * FROM operation_logs WHERE 1=1';
+  const params = [];
+
+  if (operationType) {
+    sql += ' AND operation_type = ?';
+    params.push(operationType);
+  }
+
+  if (operator) {
+    sql += ' AND operator = ?';
+    params.push(operator);
+  }
+
+  if (startDate) {
+    sql += ' AND DATE(operate_time) >= ?';
+    params.push(startDate);
+  }
+
+  if (endDate) {
+    sql += ' AND DATE(operate_time) <= ?';
+    params.push(endDate);
+  }
+
+  // 获取总数
+  const countSql = sql.replace('SELECT *', 'SELECT COUNT(*) as total');
+  const [countRows] = await pool.execute(countSql, params);
+  const total = countRows[0].total;
+
+  sql += ' ORDER BY operate_time DESC LIMIT ? OFFSET ?';
+  params.push(parseInt(pageSize), (parseInt(page) - 1) * parseInt(pageSize));
+
+  const [rows] = await pool.execute(sql, params);
+  res.json({ data: rows, total });
+});
+
+// 获取最近记录
+app.get('/api/logs/recent', authenticateToken, async (req, res) => {
+  const { limit = 5 } = req.query;
+  try {
+    const [rows] = await pool.execute(
+      'SELECT * FROM operation_logs ORDER BY operate_time DESC LIMIT ?',
+      [parseInt(limit)]
+    );
+    res.json({ records: rows });
+  } catch (error) {
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// ==================== 统计数据接口 ====================
+
+// 仪表盘统计
+app.get('/api/stats/dashboard', authenticateToken, async (req, res) => {
+  try {
+    // 在库+已拆包
+    const [stockRows] = await pool.execute(
+      "SELECT COUNT(*) as count, SUM(weight) as weight FROM raw_materials WHERE status IN ('in_stock', 'split')"
+    );
+    const totalStock = stockRows[0].count || 0;
+    const totalWeight = stockRows[0].weight || 0;
+
+    // 已拆包
+    const [splitRows] = await pool.execute(
+      "SELECT COUNT(*) as count, SUM(weight) as weight FROM raw_materials WHERE status = 'split'"
+    );
+    const splitStock = splitRows[0].count || 0;
+    const splitWeight = splitRows[0].weight || 0;
+
+    // 今日操作
+    const [todayRows] = await pool.execute(`
+      SELECT 
+        operation_type,
+        COUNT(*) as count,
+        SUM(rm.weight) as weight
+      FROM operation_logs ol
+      LEFT JOIN raw_materials rm ON ol.qr_code = rm.qr_code
+      WHERE DATE(ol.operate_time) = CURDATE()
+      GROUP BY operation_type
+    `);
+
+    let todayIn = 0, todayInWeight = 0, todayOut = 0, todayOutWeight = 0, todaySplit = 0, todaySplitWeight = 0;
+    todayRows.forEach(row => {
+      if (row.operation_type === 'IN') {
+        todayIn = row.count;
+        todayInWeight = row.weight || 0;
+      } else if (row.operation_type === 'OUT') {
+        todayOut = row.count;
+        todayOutWeight = row.weight || 0;
+      } else if (row.operation_type === 'SPLIT') {
+        todaySplit = row.count;
+        todaySplitWeight = row.weight || 0;
+      }
+    });
+    writeApiLog('DASHBOARD', req, res, { totalStock, todayIn, todayOut, todaySplit });
+
+    res.json({
+      totalStock,
+      totalWeight: Math.round(totalWeight * 100) / 100,
+      splitStock,
+      splitWeight: Math.round(splitWeight * 100) / 100,
+      todayIn,
+      todayInWeight: Math.round(todayInWeight * 100) / 100,
+      todayOut,
+      todayOutWeight: Math.round(todayOutWeight * 100) / 100,
+      todaySplit,
+      todaySplitWeight: Math.round(todaySplitWeight * 100) / 100,
+      pendingQc: 0
+    });
+  } catch (error) {
+    console.error('统计错误:', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 型号库存分布
+app.get('/api/stats/model-distribution', authenticateToken, async (req, res) => {
+  try {
+    const [rows] = await pool.execute(`
+      SELECT model, SUM(weight) as weight 
+      FROM raw_materials 
+      WHERE status IN ('in_stock', 'split')
+      GROUP BY model
+    `);
+    const result = rows.map(r => ({
+      model: r.model,
+      weight: Math.round(r.weight * 100) / 100
+    }));
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 近7天出入库趋势
+app.get('/api/stats/weekly-trend', authenticateToken, async (req, res) => {
+  try {
+    const [rows] = await pool.execute(`
+      SELECT 
+        DATE(operate_time) as date,
+        SUM(CASE WHEN operation_type = 'IN' THEN 1 ELSE 0 END) as inCount,
+        SUM(CASE WHEN operation_type = 'OUT' THEN 1 ELSE 0 END) as outCount
+      FROM operation_logs
+      WHERE operate_time >= DATE_SUB(CURDATE(), INTERVAL 6 DAY)
+      GROUP BY DATE(operate_time)
+      ORDER BY date
+    `);
+
+    // 补全缺失的日期
+    const result = [];
+    const dataMap = new Map(rows.map(r => {
+      // MySQL DATE 类型返回的可能是一个对象，需要转换为字符串
+      let dateStr;
+      if (typeof r.date === 'string') {
+        dateStr = r.date.split('T')[0];
+      } else if (r.date instanceof Date) {
+        dateStr = r.date.toISOString().split('T')[0];
+      } else {
+        dateStr = String(r.date).split('T')[0];
+      }
+      return [dateStr, r];
+    }));
+
+    for (let i = 6; i >= 0; i--) {
+      const date = new Date();
+      date.setDate(date.getDate() - i);
+      const dateStr = date.toISOString().split('T')[0];
+      const dayData = dataMap.get(dateStr);
+      result.push({
+        date: dateStr,
+        inCount: dayData ? Number(dayData.inCount) : 0,
+        outCount: dayData ? Number(dayData.outCount) : 0
+      });
+    }
+
+    res.json(result);
+  } catch (error) {
+    console.error('近7天趋势错误:', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// ==================== 报表中心统计接口 ====================
+
+// 库存趋势分析（按天）
+app.get('/api/stats/stock-trend', authenticateToken, async (req, res) => {
+  const { days = 30, model, batchNo } = req.query;
+  try {
+    // 获取每天的库存变化
+    const [rows] = await pool.execute(`
+      SELECT 
+        DATE(created_at) as date,
+        COUNT(*) as in_count,
+        SUM(weight) as in_weight
+      FROM raw_materials
+      WHERE created_at >= DATE_SUB(CURDATE(), INTERVAL ? DAY)
+      ${model ? 'AND model = ?' : ''}
+      ${batchNo ? 'AND batch_no = ?' : ''}
+      GROUP BY DATE(created_at)
+      ORDER BY date
+    `, [parseInt(days), ...(model ? [model] : []), ...(batchNo ? [batchNo] : [])]);
+
+    // 获取出库数据
+    const [outRows] = await pool.execute(`
+      SELECT 
+        DATE(out_at) as date,
+        COUNT(*) as out_count,
+        SUM(weight) as out_weight
+      FROM raw_materials
+      WHERE out_at >= DATE_SUB(CURDATE(), INTERVAL ? DAY)
+      AND status = 'out_stock'
+      ${model ? 'AND model = ?' : ''}
+      ${batchNo ? 'AND batch_no = ?' : ''}
+      GROUP BY DATE(out_at)
+    `, [parseInt(days), ...(model ? [model] : []), ...(batchNo ? [batchNo] : [])]);
+
+    // 合并数据
+    const dataMap = new Map();
+    rows.forEach(r => {
+      const dateStr = typeof r.date === 'string' ? r.date.split('T')[0] : r.date.toISOString().split('T')[0];
+      dataMap.set(dateStr, { ...dataMap.get(dateStr), in_count: r.in_count, in_weight: r.in_weight });
+    });
+    outRows.forEach(r => {
+      const dateStr = typeof r.date === 'string' ? r.date.split('T')[0] : r.date.toISOString().split('T')[0];
+      dataMap.set(dateStr, { ...dataMap.get(dateStr), out_count: r.out_count, out_weight: r.out_weight });
+    });
+
+    // 补全日期
+    const result = [];
+    for (let i = parseInt(days) - 1; i >= 0; i--) {
+      const date = new Date();
+      date.setDate(date.getDate() - i);
+      const dateStr = date.toISOString().split('T')[0];
+      const dayData = dataMap.get(dateStr) || {};
+      result.push({
+        date: dateStr.slice(5), // MM-DD
+        fullDate: dateStr,
+        inCount: dayData.in_count || 0,
+        inWeight: Math.round((dayData.in_weight || 0) * 100) / 100,
+        outCount: dayData.out_count || 0,
+        outWeight: Math.round((dayData.out_weight || 0) * 100) / 100,
+      });
+    }
+
+    res.json(result);
+  } catch (error) {
+    console.error('库存趋势分析错误:', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 库龄分布分析 - 使用生产日期计算库龄
+app.get('/api/stats/age-distribution', authenticateToken, async (req, res) => {
+  const { model, batchNo } = req.query;
+  try {
+    const [rows] = await pool.execute(`
+      SELECT 
+        id, batch_no, model, weight, production_date,
+        DATEDIFF(CURDATE(), production_date) as age
+      FROM raw_materials
+      WHERE status IN ('in_stock', 'split')
+      AND production_date IS NOT NULL
+      ${model ? 'AND model = ?' : ''}
+      ${batchNo ? 'AND batch_no = ?' : ''}
+    `, [...(model ? [model] : []), ...(batchNo ? [batchNo] : [])]);
+
+    // 分组统计
+    const groups = {
+      '0-7天': { count: 0, weight: 0 },
+      '8-30天': { count: 0, weight: 0 },
+      '31-90天': { count: 0, weight: 0 },
+      '90天以上': { count: 0, weight: 0 },
+    };
+
+    rows.forEach(r => {
+      const age = r.age;
+      let group;
+      if (age <= 7) group = '0-7天';
+      else if (age <= 30) group = '8-30天';
+      else if (age <= 90) group = '31-90天';
+      else group = '90天以上';
+      groups[group].count++;
+      groups[group].weight += Number(r.weight) || 0;
+    });
+
+    const result = Object.entries(groups).map(([name, data]) => ({
+      name,
+      count: data.count,
+      weight: Math.round(data.weight * 100) / 100,
+    }));
+
+    res.json(result);
+  } catch (error) {
+    console.error('库龄分布分析错误:', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 呆滞物料预警 - 使用生产日期计算库龄
+app.get('/api/stats/dead-stock', authenticateToken, async (req, res) => {
+  const { days = 60, model, batchNo, page = 1, pageSize = 20 } = req.query;
+  try {
+    // 查询库龄超过指定天数的物料（按生产日期计算）
+    let sql = `
+      SELECT 
+        id, qr_code, batch_no, package_no, model, weight, production_date, status,
+        DATEDIFF(CURDATE(), production_date) as age
+      FROM raw_materials
+      WHERE status IN ('in_stock', 'split')
+      AND production_date IS NOT NULL
+      AND DATEDIFF(CURDATE(), production_date) >= ?
+    `;
+    const params = [parseInt(days)];
+    
+    if (model) {
+      sql += ' AND model = ?';
+      params.push(model);
+    }
+    if (batchNo) {
+      sql += ' AND batch_no = ?';
+      params.push(batchNo);
+    }
+
+    // 获取总数
+    const countSql = sql.replace('SELECT id, qr_code, batch_no, package_no, model, weight, production_date, status, DATEDIFF(CURDATE(), production_date) as age', 'SELECT COUNT(*) as total');
+    const [countRows] = await pool.execute(countSql, params);
+    const total = countRows[0].total;
+
+    sql += ' ORDER BY age DESC LIMIT ? OFFSET ?';
+    params.push(parseInt(pageSize), (parseInt(page) - 1) * parseInt(pageSize));
+
+    const [rows] = await pool.execute(sql, params);
+
+    res.json({
+      data: rows.map((r) => ({
+        ...r,
+        riskLevel: r.age > 120 ? 'danger' : r.age > 90 ? 'warning' : 'normal'
+      })),
+      total
+    });
+  } catch (error) {
+    console.error('呆滞物料查询错误:', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 出入库统计汇总
+app.get('/api/stats/inout-summary', authenticateToken, async (req, res) => {
+  const { startDate, endDate, model } = req.query;
+  try {
+    const params = [];
+    let dateFilter = '';
+    if (startDate) {
+      dateFilter += ' AND DATE(operate_time) >= ?';
+      params.push(startDate);
+    }
+    if (endDate) {
+      dateFilter += ' AND DATE(operate_time) <= ?';
+      params.push(endDate);
+    }
+
+    // 按操作类型统计
+    const [typeStats] = await pool.execute(`
+      SELECT 
+        operation_type,
+        COUNT(*) as count
+      FROM operation_logs
+      WHERE 1=1 ${dateFilter}
+      GROUP BY operation_type
+    `, params);
+
+    // 按操作员统计
+    const [operatorStats] = await pool.execute(`
+      SELECT 
+        operator,
+        operation_type,
+        COUNT(*) as count
+      FROM operation_logs
+      WHERE 1=1 ${dateFilter}
+      GROUP BY operator, operation_type
+      ORDER BY count DESC
+    `, params);
+
+    // 按型号统计
+    const [modelStats] = await pool.execute(`
+      SELECT 
+        operation_type,
+        COUNT(*) as count
+      FROM operation_logs
+      WHERE 1=1 ${dateFilter}
+      GROUP BY operation_type
+    `, params);
+
+    res.json({
+      typeStats,
+      operatorStats,
+      modelStats
+    });
+  } catch (error) {
+    console.error('出入库统计错误:', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 操作员绩效排行
+app.get('/api/stats/operator-ranking', authenticateToken, async (req, res) => {
+  const { startDate, endDate, limit = 20 } = req.query;
+  try {
+    const params = [];
+    let dateFilter = '';
+    if (startDate) {
+      dateFilter += ' AND DATE(operate_time) >= ?';
+      params.push(startDate);
+    }
+    if (endDate) {
+      dateFilter += ' AND DATE(operate_time) <= ?';
+      params.push(endDate);
+    }
+
+    const [rows] = await pool.execute(`
+      SELECT 
+        operator,
+        COUNT(*) as total_count,
+        SUM(CASE WHEN operation_type = 'IN' THEN 1 ELSE 0 END) as in_count,
+        SUM(CASE WHEN operation_type = 'OUT' THEN 1 ELSE 0 END) as out_count,
+        SUM(CASE WHEN operation_type = 'SPLIT' OR detail LIKE '%拆包%' THEN 1 ELSE 0 END) as split_count
+      FROM operation_logs
+      WHERE operator IS NOT NULL ${dateFilter}
+      GROUP BY operator
+      ORDER BY total_count DESC
+      LIMIT ?
+    `, [...params, parseInt(limit)]);
+
+    res.json(rows);
+  } catch (error) {
+    console.error('操作员排行错误:', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 设备使用负载
+app.get('/api/stats/device-load', authenticateToken, async (req, res) => {
+  const { startDate, endDate, limit = 10 } = req.query;
+  try {
+    const params = [];
+    let dateFilter = '';
+    if (startDate) {
+      dateFilter += ' AND DATE(operate_time) >= ?';
+      params.push(startDate);
+    }
+    if (endDate) {
+      dateFilter += ' AND DATE(operate_time) <= ?';
+      params.push(endDate);
+    }
+
+    const [rows] = await pool.execute(`
+      SELECT 
+        device,
+        COUNT(*) as count
+      FROM operation_logs
+      WHERE device IS NOT NULL ${dateFilter}
+      GROUP BY device
+      ORDER BY count DESC
+      LIMIT ?
+    `, [...params, parseInt(limit)]);
+
+    const maxCount = rows.length > 0 ? rows[0].count : 1;
+    const result = rows.map((r) => ({
+      device: r.device,
+      count: r.count,
+      usageRate: Math.round((r.count / maxCount) * 100)
+    }));
+
+    res.json(result);
+  } catch (error) {
+    console.error('设备负载统计错误:', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 操作时间分布（24小时）
+app.get('/api/stats/hourly-distribution', authenticateToken, async (req, res) => {
+  const { startDate, endDate } = req.query;
+  try {
+    const params = [];
+    let dateFilter = '';
+    if (startDate) {
+      dateFilter += ' AND DATE(operate_time) >= ?';
+      params.push(startDate);
+    }
+    if (endDate) {
+      dateFilter += ' AND DATE(operate_time) <= ?';
+      params.push(endDate);
+    }
+
+    const [rows] = await pool.execute(`
+      SELECT 
+        HOUR(operate_time) as hour,
+        operation_type,
+        COUNT(*) as count
+      FROM operation_logs
+      WHERE 1=1 ${dateFilter}
+      GROUP BY HOUR(operate_time), operation_type
+      ORDER BY hour
+    `, params);
+
+    // 整理为24小时数据
+    const result = Array.from({ length: 24 }, (_, i) => ({
+      hour: i,
+      inCount: 0,
+      outCount: 0,
+      splitCount: 0,
+    }));
+
+    rows.forEach((r) => {
+      if (r.hour >= 0 && r.hour < 24) {
+        if (r.operation_type === 'IN') result[r.hour].inCount = r.count;
+        else if (r.operation_type === 'OUT') result[r.hour].outCount = r.count;
+        else if (r.operation_type === 'SPLIT') result[r.hour].splitCount = r.count;
+      }
+    });
+
+    res.json(result);
+  } catch (error) {
+    console.error('时间分布统计错误:', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// ==================== 采购建议接口 ====================
+
+// 获取采购参数列表
+app.get('/api/purchase/params', authenticateToken, async (req, res) => {
+  try {
+    // 获取所有型号
+    const [models] = await pool.execute(
+      "SELECT DISTINCT model FROM raw_materials ORDER BY model"
+    );
+    
+    // 获取已有参数
+    const [params] = await pool.execute("SELECT * FROM purchase_params");
+    const paramMap = new Map(params.map(p => [p.model, p]));
+    
+    // 合并结果
+    const result = models.map(m => {
+      const existing = paramMap.get(m.model);
+      return existing || {
+        id: null,
+        model: m.model,
+        stock_days: 7,
+        lead_days: 3,
+        min_purchase: 0,
+        enabled: true
+      };
+    });
+    
+    res.json(result);
+  } catch (error) {
+    console.error('获取采购参数失败:', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 批量保存采购参数
+app.post('/api/purchase/params/batch', authenticateToken, async (req, res) => {
+  try {
+    const { params } = req.body;
+    
+    for (const param of params) {
+      if (param.id) {
+        // 更新
+        await pool.execute(
+          `UPDATE purchase_params SET stock_days = ?, lead_days = ?, min_purchase = ?, enabled = ? WHERE id = ?`,
+          [param.stock_days, param.lead_days, param.min_purchase, param.enabled, param.id]
+        );
+      } else {
+        // 新增
+        const id = uuidv4();
+        await pool.execute(
+          `INSERT INTO purchase_params (id, model, stock_days, lead_days, min_purchase, enabled) VALUES (?, ?, ?, ?, ?, ?`,
+          [id, param.model, param.stock_days, param.lead_days, param.min_purchase, param.enabled]
+        );
+      }
+    }
+    
+    res.json({ success: true });
+  } catch (error) {
+    console.error('保存采购参数失败:', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 计算每日出库统计
+app.post('/api/purchase/calc-daily-stats', authenticateToken, async (req, res) => {
+  try {
+    // 从operation_logs统计每日出库
+    const [rows] = await pool.execute(`
+      SELECT 
+        rm.model,
+        DATE(ol.operate_time) as stat_date,
+        COUNT(*) as out_count,
+        SUM(rm.weight) as out_weight
+      FROM operation_logs ol
+      JOIN raw_materials rm ON ol.qr_code = rm.qr_code
+      WHERE ol.operation_type = 'OUT'
+      GROUP BY rm.model, DATE(ol.operate_time)
+    `);
+    
+    // 清空旧数据
+    await pool.execute('TRUNCATE TABLE daily_out_stats');
+    
+    // 插入新数据
+    for (const row of rows) {
+      const id = uuidv4();
+      await pool.execute(
+        `INSERT INTO daily_out_stats (id, model, stat_date, out_count, out_weight) VALUES (?, ?, ?, ?, ?)`,
+        [id, row.model, row.stat_date, row.out_count, row.out_weight]
+      );
+    }
+    
+    res.json({ success: true, count: rows.length });
+  } catch (error) {
+    console.error('计算每日统计失败:', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 计算采购建议
+app.post('/api/purchase/calc-suggestions', authenticateToken, async (req, res) => {
+  try {
+    // 获取所有型号的当前库存
+    const [stocks] = await pool.execute(`
+      SELECT model, SUM(weight) as current_stock
+      FROM raw_materials
+      WHERE status IN ('in_stock', 'split')
+      GROUP BY model
+    `);
+    
+    // 获取参数配置
+    const [params] = await pool.execute("SELECT * FROM purchase_params WHERE enabled = TRUE");
+    const paramMap = new Map(params.map(p => [p.model, p]));
+    
+    // 获取近7天出库统计
+    const [stats] = await pool.execute(`
+      SELECT model, 
+        COUNT(DISTINCT stat_date) as days_with_data,
+        SUM(out_weight) as total_out_weight
+      FROM daily_out_stats
+      WHERE stat_date >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)
+      GROUP BY model
+    `);
+    const statsMap = new Map(stats.map(s => [s.model, s]));
+    
+    // 清空旧建议
+    await pool.execute("DELETE FROM purchase_suggestions WHERE status = 'pending'");
+    
+    let count = 0;
+    for (const stock of stocks) {
+      const param = paramMap.get(stock.model) || { stock_days: 7, lead_days: 3, min_purchase: 0 };
+      const stat = statsMap.get(stock.model) || { days_with_data: 0, total_out_weight: 0 };
+      
+      const avgDailyOut = stat.days_with_data > 0 ? stat.total_out_weight / 7 : 0;
+      const reorderPoint = avgDailyOut * (param.stock_days + param.lead_days);
+      let suggestQty = Math.max(0, reorderPoint - stock.current_stock);
+      
+      // 如果有最小采购量限制
+      if (suggestQty > 0 && suggestQty < param.min_purchase) {
+        suggestQty = param.min_purchase;
+      }
+      
+      // 只保存需要采购的
+      if (suggestQty > 0) {
+        const id = uuidv4();
+        await pool.execute(
+          `INSERT INTO purchase_suggestions (id, model, current_stock, avg_daily_out, reorder_point, suggest_qty, stock_days, lead_days, days_with_data, status)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
+          [id, stock.model, stock.current_stock, avgDailyOut, reorderPoint, suggestQty, param.stock_days, param.lead_days, stat.days_with_data]
+        );
+        count++;
+      }
+    }
+    
+    res.json({ count });
+  } catch (error) {
+    console.error('计算采购建议失败:', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 获取采购建议列表
+app.get('/api/purchase/suggestions', authenticateToken, async (req, res) => {
+  try {
+    const { status } = req.query;
+    let sql = "SELECT * FROM purchase_suggestions";
+    const params = [];
+    
+    if (status) {
+      sql += " WHERE status = ?";
+      params.push(status);
+    }
+    
+    sql += " ORDER BY created_at DESC";
+    
+    const [rows] = await pool.execute(sql, params);
+    res.json(rows);
+  } catch (error) {
+    console.error('获取采购建议失败:', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 更新采购建议状态
+app.put('/api/purchase/suggestions/:id', authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body;
+    
+    await pool.execute(
+      "UPDATE purchase_suggestions SET status = ? WHERE id = ?",
+      [status, id]
+    );
+    
+    res.json({ success: true });
+  } catch (error) {
+    console.error('更新采购建议失败:', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 获取型号出库趋势
+app.get('/api/purchase/model-trend/:model', authenticateToken, async (req, res) => {
+  try {
+    const { model } = req.params;
+    const { days = 14 } = req.query;
+    
+    const [rows] = await pool.execute(`
+      SELECT stat_date as date, out_count, out_weight
+      FROM daily_out_stats
+      WHERE model = ? AND stat_date >= DATE_SUB(CURDATE(), INTERVAL ? DAY)
+      ORDER BY stat_date
+    `, [model, parseInt(days)]);
+    
+    res.json(rows);
+  } catch (error) {
+    console.error('获取趋势数据失败:', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 获取所有型号分析
+app.get('/api/purchase/all-analysis', authenticateToken, async (req, res) => {
+  try {
+    // 获取所有型号的当前库存
+    const [stocks] = await pool.execute(`
+      SELECT model, SUM(weight) as current_stock
+      FROM raw_materials
+      WHERE status IN ('in_stock', 'split')
+      GROUP BY model
+    `);
+    
+    // 获取参数配置
+    const [params] = await pool.execute("SELECT * FROM purchase_params");
+    const paramMap = new Map(params.map(p => [p.model, p]));
+    
+    // 获取近7天出库统计
+    const [stats] = await pool.execute(`
+      SELECT model, 
+        COUNT(DISTINCT stat_date) as days_with_data,
+        SUM(out_count) as total_out_count_7days,
+        SUM(out_weight) as total_out_weight_7days
+      FROM daily_out_stats
+      WHERE stat_date >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)
+      GROUP BY model
+    `);
+    const statsMap = new Map(stats.map(s => [s.model, s]));
+    
+    const result = stocks.map(stock => {
+      const param = paramMap.get(stock.model) || { stock_days: 7, lead_days: 3, min_purchase: 0, enabled: true };
+      const stat = statsMap.get(stock.model) || { days_with_data: 0, total_out_count_7days: 0, total_out_weight_7days: 0 };
+      
+      const avgDailyOut = stat.days_with_data > 0 ? stat.total_out_weight_7days / 7 : 0;
+      const reorderPoint = avgDailyOut * (param.stock_days + param.lead_days);
+      let suggestQty = Math.max(0, reorderPoint - stock.current_stock);
+      
+      if (suggestQty > 0 && suggestQty < param.min_purchase) {
+        suggestQty = param.min_purchase;
+      }
+      
+      const needPurchase = suggestQty > 0 && avgDailyOut > 0;
+      let stockStatus = '充足';
+      if (avgDailyOut === 0) stockStatus = '无出库数据';
+      else if (needPurchase) stockStatus = '需要补货';
+      
+      return {
+        model: stock.model,
+        current_stock: stock.current_stock,
+        avg_daily_out: Math.round(avgDailyOut * 100) / 100,
+        reorder_point: Math.round(reorderPoint * 100) / 100,
+        suggest_qty: Math.round(suggestQty * 100) / 100,
+        stock_days: param.stock_days,
+        lead_days: param.lead_days,
+        min_purchase: param.min_purchase,
+        enabled: param.enabled !== false,
+        days_with_data: stat.days_with_data,
+        total_out_7days: Math.round((stat.total_out_weight_7days || 0) * 100) / 100,
+        need_purchase: needPurchase,
+        stock_status: stockStatus
+      };
+    });
+    
+    res.json(result);
+  } catch (error) {
+    console.error('获取分析数据失败:', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// ==================== 待入库明细接口 ====================
+
+// 获取发货清单列表
+app.get('/api/shipping/lists', authenticateToken, async (req, res) => {
+  try {
+    const [lists] = await pool.execute(`
+      SELECT sl.*, 
+        (SELECT COUNT(*) FROM shipping_items WHERE shipping_list_id = sl.id) as total_count,
+        (SELECT COUNT(*) FROM shipping_items WHERE shipping_list_id = sl.id AND status = 'pending') as pending_count,
+        (SELECT COUNT(*) FROM shipping_items WHERE shipping_list_id = sl.id AND status = 'matched') as matched_count
+      FROM shipping_lists sl
+      ORDER BY sl.created_at DESC
+    `);
+    res.json(lists);
+  } catch (error) {
+    console.error('获取发货清单失败:', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 获取发货明细列表（支持分页，兼容旧前端）
+app.get('/api/shipping/items', authenticateToken, async (req, res) => {
+  try {
+    const { list_id, status, page, pageSize, batch_no, package_no, vehicle_plate } = req.query;
+    
+    // 检测是否是新前端请求（有明确的page参数）
+    const isNewFrontend = page !== undefined;
+    const pageNum = parseInt(page) || 1;
+    const pageSizeNum = parseInt(pageSize) || 20;
+    const offset = (pageNum - 1) * pageSizeNum;
+    
+    let countSql = `
+      SELECT COUNT(*) as total
+      FROM shipping_items si
+      LEFT JOIN shipping_lists sl ON si.shipping_list_id = sl.id
+      WHERE 1=1
+    `;
+    
+    let dataSql = `
+      SELECT si.*, sl.shipping_date, sl.vehicle_plate, sl.batch_no
+      FROM shipping_items si
+      LEFT JOIN shipping_lists sl ON si.shipping_list_id = sl.id
+      WHERE 1=1
+    `;
+    const params = [];
+    
+    if (list_id) {
+      countSql += " AND si.shipping_list_id = ?";
+      dataSql += " AND si.shipping_list_id = ?";
+      params.push(list_id);
+    }
+    if (status) {
+      countSql += " AND si.status = ?";
+      dataSql += " AND si.status = ?";
+      params.push(status);
+    }
+    if (batch_no) {
+      countSql += " AND si.batch_no LIKE ?";
+      dataSql += " AND si.batch_no LIKE ?";
+      params.push(`%${batch_no}%`);
+    }
+    if (package_no) {
+      countSql += " AND si.package_no LIKE ?";
+      dataSql += " AND si.package_no LIKE ?";
+      params.push(`%${package_no}%`);
+    }
+    if (vehicle_plate) {
+      countSql += " AND sl.vehicle_plate LIKE ?";
+      dataSql += " AND sl.vehicle_plate LIKE ?";
+      params.push(`%${vehicle_plate}%`);
+    }
+    
+    if (isNewFrontend) {
+      // 新前端：返回分页格式
+      const [countResult] = await pool.execute(countSql, params);
+      const total = countResult[0].total;
+      
+      dataSql += " ORDER BY si.created_at DESC LIMIT ? OFFSET ?";
+      const dataParams = [...params, pageSizeNum, offset];
+      
+      const [items] = await pool.execute(dataSql, dataParams);
+      res.json({ items, total });
+    } else {
+      // 旧前端：返回数组格式（兼容）
+      dataSql += " ORDER BY si.created_at DESC";
+      const [items] = await pool.execute(dataSql, params);
+      res.json(items);
+    }
+  } catch (error) {
+    console.error('获取发货明细失败:', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 上传发货清单（Excel导入）
+app.post('/api/shipping/upload', authenticateToken, async (req, res) => {
+  try {
+    const { items, shipping_date, shipping_order_number } = req.body;
+    
+    // 创建发货清单
+    const listId = uuidv4();
+    await pool.execute(
+      `INSERT INTO shipping_lists (id, shipping_date, shipping_order_number, status, created_at) VALUES (?, ?, ?, 'pending', NOW())`,
+      [listId, shipping_date, shipping_order_number]
+    );
+    
+    // 插入明细
+    for (const item of items) {
+      const itemId = uuidv4();
+      await pool.execute(
+        `INSERT INTO shipping_items (id, shipping_list_id, batch_no, model, weight, status, created_at) VALUES (?, ?, ?, ?, ?, 'pending', NOW())`,
+        [itemId, listId, item.batch_no, item.model, item.weight]
+      );
+    }
+    
+    res.json({ success: true, list_id: listId, count: items.length });
+  } catch (error) {
+    console.error('上传发货清单失败:', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 删除发货清单
+app.delete('/api/shipping/lists/:id', authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    // 先删除明细
+    await pool.execute("DELETE FROM shipping_items WHERE shipping_list_id = ?", [id]);
+    // 再删除清单
+    await pool.execute("DELETE FROM shipping_lists WHERE id = ?", [id]);
+    
+    res.json({ success: true });
+  } catch (error) {
+    console.error('删除发货清单失败:', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 导入发货清单（Excel解析后）
+app.post('/api/shipping/import', authenticateToken, async (req, res) => {
+  try {
+    const { batch_no, shipping_date, vehicle_plate, items, force } = req.body;
+    
+    if (!items || items.length === 0) {
+      return res.status(400).json({ error: '没有待导入的数据' });
+    }
+    
+    // 确保参数不为undefined
+    const safeBatchNo = batch_no || '';
+    const safeShippingDate = shipping_date || null;
+    const safeVehiclePlate = vehicle_plate || null;
+    
+    // 检查是否已存在该批次的清单（批号+发货日期+车牌号组合判断）
+    const [existing] = await pool.execute(
+      "SELECT id FROM shipping_lists WHERE batch_no = ? AND shipping_date = ? AND vehicle_plate = ?",
+      [safeBatchNo, safeShippingDate, safeVehiclePlate]
+    );
+    
+    if (existing.length > 0 && !force) {
+      return res.status(400).json({ error: `该清单已导入（批号: ${safeBatchNo}, 日期: ${safeShippingDate}, 车牌: ${safeVehiclePlate}），请选择覆盖` });
+    }
+    
+    // 如果强制覆盖，先删除旧数据
+    if (existing.length > 0 && force) {
+      await pool.execute("DELETE FROM shipping_items WHERE shipping_list_id = ?", [existing[0].id]);
+      await pool.execute("DELETE FROM shipping_lists WHERE id = ?", [existing[0].id]);
+    }
+    
+    // 创建发货清单
+    const listId = uuidv4();
+    await pool.execute(
+      `INSERT INTO shipping_lists (id, batch_no, shipping_date, vehicle_plate, status, created_at) VALUES (?, ?, ?, ?, 'pending', NOW())`,
+      [listId, safeBatchNo, safeShippingDate, safeVehiclePlate]
+    );
+    
+    let matchedCount = 0;
+    let pendingCount = 0;
+    
+    // 确保matched_stock_id列存在
+    try {
+      await pool.execute(`ALTER TABLE shipping_items ADD COLUMN IF NOT EXISTS matched_stock_id VARCHAR(36)`);
+    } catch (e) {
+      // 列可能已存在，忽略错误
+    }
+    
+    // 插入明细并尝试自动匹配
+    for (const item of items) {
+      const itemId = uuidv4();
+      const itemPackageNo = (item.package_no || '').trim();
+      const itemWeight = item.weight || 0;
+      
+      // 查找是否有匹配的入库记录（不限制状态）
+      let matched = [];
+      
+      // 方式1: 精确匹配 batch_no 和 package_no
+      [matched] = await pool.execute(
+        `SELECT id, qr_code FROM raw_materials WHERE batch_no = ? AND package_no = ? LIMIT 1`,
+        [safeBatchNo, itemPackageNo]
+      );
+      
+      // 方式2: 如果没匹配到，尝试用 qr_code 后缀匹配（处理包号包含批号前缀的情况）
+      if (matched.length === 0) {
+        // 例如：清单包号 "ABC123-1"，入库包号 "1"，需要匹配
+        const qrPrefix = `${safeBatchNo}-${itemPackageNo}~`;
+        [matched] = await pool.execute(
+          `SELECT id, qr_code, batch_no, package_no FROM raw_materials WHERE qr_code LIKE ? LIMIT 1`,
+          [`${qrPrefix}%`]
+        );
+      }
+      
+      // 方式3: 尝试提取纯数字包号匹配
+      if (matched.length === 0 && itemPackageNo.includes('-')) {
+        // 如果清单包号是 "ABC123-1" 格式，提取最后数字部分
+        const lastDashIdx = itemPackageNo.lastIndexOf('-');
+        const purePackageNo = itemPackageNo.substring(lastDashIdx + 1);
+        [matched] = await pool.execute(
+          `SELECT id, qr_code FROM raw_materials WHERE batch_no = ? AND package_no = ? LIMIT 1`,
+          [safeBatchNo, purePackageNo]
+        );
+      }
+      
+      // 方式4: 批号前缀匹配（入库批号如 P0426020068-04Y2，清单批号如 P0426020068）
+      if (matched.length === 0) {
+        [matched] = await pool.execute(
+          `SELECT id, qr_code, batch_no, package_no FROM raw_materials 
+           WHERE package_no = ? AND (batch_no = ? OR batch_no LIKE ?) LIMIT 1`,
+          [itemPackageNo, safeBatchNo, `${safeBatchNo}-%`]
+        );
+      }
+      
+      let status = 'pending';
+      let qrCode = null;
+      let matchedStockId = null;
+      
+      if (matched.length > 0) {
+        status = 'matched';
+        qrCode = matched[0].qr_code;
+        matchedStockId = matched[0].id;
+        matchedCount++;
+      } else {
+        pendingCount++;
+      }
+      
+      await pool.execute(
+        `INSERT INTO shipping_items (id, shipping_list_id, batch_no, package_no, weight, vehicle_plate, status, qr_code, matched_stock_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+        [itemId, listId, safeBatchNo, itemPackageNo, itemWeight, safeVehiclePlate, status, qrCode, matchedStockId]
+      );
+    }
+    
+    res.json({
+      success: true,
+      list_id: listId,
+      total_items: items.length,
+      matched_count: matchedCount,
+      pending_count: pendingCount
+    });
+  } catch (error) {
+    console.error('导入发货清单失败:', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 刷新匹配状态
+app.post('/api/shipping/refresh-match', authenticateToken, async (req, res) => {
+  try {
+    // 确保所需列存在 - 兼容性处理
+    try {
+      const [columns] = await pool.execute(`SHOW COLUMNS FROM shipping_items LIKE 'matched_stock_id'`);
+      if (columns.length === 0) {
+        await pool.execute(`ALTER TABLE shipping_items ADD COLUMN matched_stock_id VARCHAR(36)`);
+        console.log('添加 matched_stock_id 列成功');
+      }
+    } catch (e) {
+      console.log('matched_stock_id 列检查/添加:', e.message);
+    }
+    
+    try {
+      const [columns] = await pool.execute(`SHOW COLUMNS FROM shipping_items LIKE 'matched_at'`);
+      if (columns.length === 0) {
+        await pool.execute(`ALTER TABLE shipping_items ADD COLUMN matched_at DATETIME`);
+        console.log('添加 matched_at 列成功');
+      }
+    } catch (e) {
+      console.log('matched_at 列检查/添加:', e.message);
+    }
+    
+    // 先更新已有 matched_stock_id 的记录
+    try {
+      const [updateResult] = await pool.execute(
+        `UPDATE shipping_items si
+         LEFT JOIN raw_materials rm ON si.matched_stock_id = rm.id
+         SET si.matched_at = rm.created_at
+         WHERE si.status = 'matched' AND si.matched_at IS NULL AND si.matched_stock_id IS NOT NULL`
+      );
+      console.log(`更新已有matched_stock_id的时间: ${updateResult.affectedRows} 条记录`);
+    } catch (e) {
+      console.log('更新已有matched_stock_id时间失败:', e.message);
+    }
+    
+    // 对于已匹配但没有 matched_stock_id 的记录，重新查找入库记录
+    const [matchedNoStockId] = await pool.execute(
+      `SELECT id, batch_no, package_no FROM shipping_items WHERE status = 'matched' AND matched_stock_id IS NULL`
+    );
+    console.log(`需要补充matched_stock_id的记录: ${matchedNoStockId.length} 条`);
+    
+    let updatedCount = 0;
+    for (const item of matchedNoStockId) {
+      const itemBatchNo = (item.batch_no || '').trim();
+      const itemPackageNo = (item.package_no || '').trim();
+      
+      // 查找匹配的入库记录
+      const [matched] = await pool.execute(
+        `SELECT id, qr_code, created_at FROM raw_materials 
+         WHERE package_no = ? 
+         AND (batch_no = ? OR batch_no LIKE ?)
+         LIMIT 1`,
+        [itemPackageNo, itemBatchNo, `${itemBatchNo}-%`]
+      );
+      
+      if (matched.length > 0) {
+        await pool.execute(
+          `UPDATE shipping_items SET matched_stock_id = ?, matched_at = ? WHERE id = ?`,
+          [matched[0].id, matched[0].created_at, item.id]
+        );
+        updatedCount++;
+      }
+    }
+    console.log(`补充matched_stock_id和时间: ${updatedCount} 条记录`);
+    
+    // 查找所有待入库的 shipping_items
+    const [pendingItems] = await pool.execute(
+      `SELECT si.id, si.batch_no, si.package_no 
+       FROM shipping_items si 
+       WHERE si.status = 'pending'`
+    );
+    
+    let matchedCount = 0;
+    
+    for (const item of pendingItems) {
+      const itemBatchNo = (item.batch_no || '').trim();
+      const itemPackageNo = (item.package_no || '').trim();
+      
+      // 查找匹配的入库记录（批号前缀匹配 + 包号精确匹配）
+      // 不限制状态，只要有入库记录就匹配
+      const [matched] = await pool.execute(
+        `SELECT id, qr_code, batch_no, package_no FROM raw_materials 
+         WHERE package_no = ? 
+         AND (batch_no = ? OR batch_no LIKE ?)
+         LIMIT 1`,
+        [itemPackageNo, itemBatchNo, `${itemBatchNo}-%`]
+      );
+      
+      if (matched.length > 0) {
+        // 更新状态为已匹配，并保存matched_stock_id
+        await pool.execute(
+          `UPDATE shipping_items SET status = 'matched', qr_code = ?, matched_stock_id = ?, matched_at = NOW() WHERE id = ?`,
+          [matched[0].qr_code, matched[0].id, item.id]
+        );
+        matchedCount++;
+        console.log(`匹配成功: 清单批号=${itemBatchNo}, 清单包号=${itemPackageNo} -> 入库批号=${matched[0].batch_no}, 入库包号=${matched[0].package_no}`);
+      }
+    }
+    
+    // 获取剩余待入库数量
+    const [remaining] = await pool.execute(
+      "SELECT COUNT(*) as count FROM shipping_items WHERE status = 'pending'"
+    );
+    
+    res.json({
+      matched_count: matchedCount,
+      remaining_pending: remaining[0].count
+    });
+  } catch (error) {
+    console.error('刷新匹配失败:', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 获取待入库明细（按状态过滤）
+app.get('/api/shipping/pending', authenticateToken, async (req, res) => {
+  try {
+    const { status } = req.query;
+    let sql = `
+      SELECT si.*, sl.shipping_date, sl.vehicle_plate, sl.batch_no
+      FROM shipping_items si
+      LEFT JOIN shipping_lists sl ON si.shipping_list_id = sl.id
+      WHERE 1=1
+    `;
+    const params = [];
+    
+    if (status) {
+      sql += " AND si.status = ?";
+      params.push(status);
+    }
+    
+    sql += " ORDER BY sl.shipping_date DESC, si.created_at DESC";
+    
+    const [items] = await pool.execute(sql, params);
+    res.json(items);
+  } catch (error) {
+    console.error('获取待入库明细失败:', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 更新发货明细状态
+app.put('/api/shipping/items/:id', authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status, qr_code, manual_note } = req.body;
+    
+    let sql = "UPDATE shipping_items SET status = ?";
+    const params = [status];
+    
+    if (qr_code) {
+      sql += ", qr_code = ?";
+      params.push(qr_code);
+    }
+    if (manual_note) {
+      sql += ", manual_note = ?";
+      params.push(manual_note);
+    }
+    
+    sql += " WHERE id = ?";
+    params.push(id);
+    
+    await pool.execute(sql, params);
+    res.json({ success: true });
+  } catch (error) {
+    console.error('更新发货明细失败:', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 获取已入库但未导入发货清单的记录
+app.get('/api/shipping/unimported', authenticateToken, async (req, res) => {
+  try {
+    // 1. 获取所有已入库的 raw_materials（不限制日期，显示所有未匹配的入库记录）
+    const [rmItems] = await pool.execute(`
+      SELECT id, batch_no, package_no, weight, model, created_at, production_date, qr_code
+      FROM raw_materials 
+      WHERE status IN ('in_stock', 'split')
+      ORDER BY created_at DESC
+    `);
+    
+    // 2. 获取所有 shipping_items
+    const [siItems] = await pool.execute(`
+      SELECT batch_no, package_no, weight
+      FROM shipping_items 
+      WHERE batch_no IS NOT NULL
+    `);
+    
+    // 3. 在JS中匹配 - 使用批次、包号、重量三个字段
+    const unimported = rmItems.filter(rm => {
+      const rmPkg = String(rm.package_no).trim();
+      const rmBatch = String(rm.batch_no).trim();
+      const rmWeight = parseFloat(rm.weight) || 0;
+      const rmPrefix = rmBatch.split('-')[0]; // 提取第一个-之前的部分
+      
+      return !siItems.some(si => {
+        const siPkg = String(si.package_no).trim();
+        const siBatch = String(si.batch_no).trim();
+        const siWeight = parseFloat(si.weight) || 0;
+        
+        // 匹配条件：包号相同 且 (批次号完全匹配或前缀匹配) 且 重量相同（允许0.01误差）
+        const pkgMatch = siPkg === rmPkg;
+        const batchMatch = siBatch === rmBatch || siBatch === rmPrefix;
+        const weightMatch = siWeight === rmWeight;
+        
+        return pkgMatch && batchMatch && weightMatch;
+      });
+    });
+    
+    // 格式化返回数据
+    const result = unimported.map(item => ({
+      ...item,
+      created_at: formatDateTime(item.created_at),
+      production_date: formatDateOnly(item.production_date)
+    }));
+    
+    res.json(result);
+  } catch (error) {
+    console.error('获取未导入清单失败:', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 批量将未导入记录标记为已导入（创建虚拟发货清单）
+app.post('/api/shipping/mark-imported', authenticateToken, async (req, res) => {
+  const { item_ids, shipping_date, vehicle_plate, batch_no } = req.body;
+  
+  if (!item_ids || !Array.isArray(item_ids) || item_ids.length === 0) {
+    return res.status(400).json({ error: '请选择要导入的记录' });
+  }
+  
+  try {
+    // 创建一个虚拟发货清单
+    const listId = uuidv4();
+    const today = shipping_date || new Date().toISOString().split('T')[0];
+    const defaultBatchNo = batch_no || '历史数据导入';
+    const defaultVehiclePlate = vehicle_plate || '系统导入';
+    
+    await pool.execute(
+      `INSERT INTO shipping_lists (id, batch_no, shipping_date, vehicle_plate, status, created_at) VALUES (?, ?, ?, ?, 'completed', NOW())`,
+      [listId, defaultBatchNo, today, defaultVehiclePlate]
+    );
+    
+    // 获取选中的记录
+    const [items] = await pool.execute(`
+      SELECT id, batch_no, package_no, weight, model, qr_code
+      FROM raw_materials 
+      WHERE id IN (${item_ids.map(() => '?').join(',')})
+    `, item_ids);
+    
+    let importedCount = 0;
+    
+    for (const item of items) {
+      const itemId = uuidv4();
+      await pool.execute(
+        `INSERT INTO shipping_items (id, shipping_list_id, batch_no, package_no, weight, status, qr_code, matched_stock_id, created_at) VALUES (?, ?, ?, ?, ?, 'matched', ?, ?, NOW())`,
+        [itemId, listId, item.batch_no, item.package_no, item.weight, item.qr_code, item.id]
+      );
+      importedCount++;
+    }
+    
+    res.json({ 
+      success: true, 
+      message: `成功导入 ${importedCount} 条记录到发货清单`,
+      list_id: listId,
+      count: importedCount
+    });
+  } catch (error) {
+    console.error('批量标记已导入失败:', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 一键导入所有未导入记录
+app.post('/api/shipping/import-all-unimported', authenticateToken, async (req, res) => {
+  const { shipping_date, vehicle_plate, batch_no } = req.body;
+  
+  try {
+    // 1. 获取所有未导入记录
+    const [rmItems] = await pool.execute(`
+      SELECT id, batch_no, package_no, weight, model, created_at, production_date, qr_code
+      FROM raw_materials 
+      WHERE status IN ('in_stock', 'split')
+      ORDER BY created_at DESC
+    `);
+    
+    const [siItems] = await pool.execute(`
+      SELECT batch_no, package_no, weight
+      FROM shipping_items 
+      WHERE batch_no IS NOT NULL
+    `);
+    
+    const unimported = rmItems.filter(rm => {
+      const rmPkg = String(rm.package_no).trim();
+      const rmBatch = String(rm.batch_no).trim();
+      const rmWeight = parseFloat(rm.weight) || 0;
+      const rmPrefix = rmBatch.split('-')[0];
+      
+      return !siItems.some(si => {
+        const siPkg = String(si.package_no).trim();
+        const siBatch = String(si.batch_no).trim();
+        const siWeight = parseFloat(si.weight) || 0;
+        
+        const pkgMatch = siPkg === rmPkg;
+        const batchMatch = siBatch === rmBatch || siBatch === rmPrefix;
+        const weightMatch = siWeight === rmWeight;
+        
+        return pkgMatch && batchMatch && weightMatch;
+      });
+    });
+    
+    if (unimported.length === 0) {
+      return res.json({ success: true, message: '没有需要导入的记录', count: 0 });
+    }
+    
+    // 创建虚拟发货清单
+    const listId = uuidv4();
+    const today = shipping_date || new Date().toISOString().split('T')[0];
+    const defaultBatchNo = batch_no || '历史数据批量导入';
+    const defaultVehiclePlate = vehicle_plate || '系统导入';
+    
+    await pool.execute(
+      `INSERT INTO shipping_lists (id, batch_no, shipping_date, vehicle_plate, status, created_at) VALUES (?, ?, ?, ?, 'completed', NOW())`,
+      [listId, defaultBatchNo, today, defaultVehiclePlate]
+    );
+    
+    let importedCount = 0;
+    
+    for (const item of unimported) {
+      const itemId = uuidv4();
+      await pool.execute(
+        `INSERT INTO shipping_items (id, shipping_list_id, batch_no, package_no, weight, status, qr_code, matched_stock_id, created_at) VALUES (?, ?, ?, ?, ?, 'matched', ?, ?, NOW())`,
+        [itemId, listId, item.batch_no, item.package_no, item.weight, item.qr_code, item.id]
+      );
+      importedCount++;
+    }
+    
+    res.json({ 
+      success: true, 
+      message: `成功将 ${importedCount} 条记录导入发货清单`,
+      list_id: listId,
+      count: importedCount
+    });
+  } catch (error) {
+    console.error('批量导入失败:', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 健康检查
+app.get('/api/health', (req, res) => {
+  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+// ==================== 集成配置接口 ====================
+
+// 初始化集成配置表
+async function initIntegrationConfigTable() {
+  try {
+    await pool.execute(`
+      CREATE TABLE IF NOT EXISTS integration_config (
+        id VARCHAR(36) PRIMARY KEY,
+        type ENUM('feishu', 'wechat_work', 'ai_model') NOT NULL,
+        name VARCHAR(100) NOT NULL,
+        config JSON NOT NULL,
+        enabled BOOLEAN DEFAULT TRUE,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uk_type (type)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `);
+    console.log('集成配置表初始化完成');
+  } catch (error) {
+    console.error('初始化集成配置表失败:', error.message);
+  }
+}
+
+// 获取所有集成配置
+app.get('/api/integration/configs', authenticateToken, async (req, res) => {
+  try {
+    const [rows] = await pool.execute(
+      'SELECT id, type, name, enabled, created_at, updated_at FROM integration_config'
+    );
+    
+    // 返回配置，但不暴露敏感信息
+    const configs = rows.map(row => ({
+      ...row,
+      hasConfig: true
+    }));
+    
+    res.json(configs);
+  } catch (error) {
+    console.error('获取集成配置失败:', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 获取指定类型的配置
+app.get('/api/integration/config/:type', authenticateToken, async (req, res) => {
+  const { type } = req.params;
+  
+  if (!['feishu', 'wechat_work', 'ai_model'].includes(type)) {
+    return res.status(400).json({ error: '无效的配置类型' });
+  }
+  
+  try {
+    const [rows] = await pool.execute(
+      'SELECT * FROM integration_config WHERE type = ?',
+      [type]
+    );
+    
+    if (rows.length === 0) {
+      return res.json({ type, enabled: false, config: {} });
+    }
+    
+    const config = rows[0];
+    
+    // 返回配置时隐藏敏感信息
+    const safeConfig = { ...config.config };
+    if (safeConfig.appSecret) {
+      safeConfig.appSecretPreview = safeConfig.appSecret.substring(0, 4) + '****';
+      delete safeConfig.appSecret;
+    }
+    if (safeConfig.agentSecret) {
+      safeConfig.agentSecretPreview = safeConfig.agentSecret.substring(0, 4) + '****';
+      delete safeConfig.agentSecret;
+    }
+    if (safeConfig.apiKey) {
+      safeConfig.apiKeyPreview = safeConfig.apiKey.substring(0, 8) + '****';
+      delete safeConfig.apiKey;
+    }
+    
+    res.json({
+      id: config.id,
+      type: config.type,
+      name: config.name,
+      enabled: config.enabled,
+      config: safeConfig,
+      created_at: config.created_at,
+      updated_at: config.updated_at
+    });
+  } catch (error) {
+    console.error('获取集成配置失败:', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 保存集成配置
+app.post('/api/integration/config/:type', authenticateToken, async (req, res) => {
+  const { type } = req.params;
+  const { name, config, enabled } = req.body;
+  
+  if (!['feishu', 'wechat_work', 'ai_model'].includes(type)) {
+    return res.status(400).json({ error: '无效的配置类型' });
+  }
+  
+  try {
+    // 检查是否已存在
+    const [existing] = await pool.execute(
+      'SELECT id FROM integration_config WHERE type = ?',
+      [type]
+    );
+    
+    if (existing.length > 0) {
+      // 更新现有配置
+      // 如果没有传入新的密钥，保留旧的
+      const [oldConfig] = await pool.execute(
+        'SELECT config FROM integration_config WHERE type = ?',
+        [type]
+      );
+      const oldConfigData = oldConfig[0]?.config || {};
+      
+      const mergedConfig = { ...oldConfigData, ...config };
+      
+      await pool.execute(
+        'UPDATE integration_config SET name = ?, config = ?, enabled = ?, updated_at = NOW() WHERE type = ?',
+        [name || type, JSON.stringify(mergedConfig), enabled !== false, type]
+      );
+    } else {
+      // 创建新配置
+      const id = uuidv4();
+      await pool.execute(
+        'INSERT INTO integration_config (id, type, name, config, enabled) VALUES (?, ?, ?, ?, ?)',
+        [id, type, name || type, JSON.stringify(config), enabled !== false]
+      );
+    }
+    
+    res.json({ success: true, message: '配置保存成功' });
+  } catch (error) {
+    console.error('保存集成配置失败:', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 删除集成配置
+app.delete('/api/integration/config/:type', authenticateToken, async (req, res) => {
+  const { type } = req.params;
+  
+  try {
+    await pool.execute('DELETE FROM integration_config WHERE type = ?', [type]);
+    res.json({ success: true });
+  } catch (error) {
+    console.error('删除集成配置失败:', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 测试集成连接
+app.post('/api/integration/test/:type', authenticateToken, async (req, res) => {
+  const { type } = req.params;
+  
+  try {
+    const [rows] = await pool.execute(
+      'SELECT config FROM integration_config WHERE type = ? AND enabled = TRUE',
+      [type]
+    );
+    
+    if (rows.length === 0) {
+      return res.status(400).json({ error: '配置不存在或未启用' });
+    }
+    
+    const config = rows[0].config;
+    
+    if (type === 'feishu') {
+      // 测试飞书连接
+      const response = await fetch('https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          app_id: config.appId,
+          app_secret: config.appSecret
+        })
+      });
+      
+      const data = await response.json();
+      if (data.code === 0) {
+        return res.json({ success: true, message: '飞书连接成功' });
+      } else {
+        return res.status(400).json({ error: '飞书连接失败: ' + data.msg });
+      }
+    } else if (type === 'wechat_work') {
+      // 测试企业微信连接
+      const response = await fetch(
+        `https://qyapi.weixin.qq.com/cgi-bin/gettoken?corpid=${config.corpId}&corpsecret=${config.agentSecret}`
+      );
+      
+      const data = await response.json();
+      if (data.errcode === 0) {
+        return res.json({ success: true, message: '企业微信连接成功' });
+      } else {
+        return res.status(400).json({ error: '企业微信连接失败: ' + data.errmsg });
+      }
+    }
+    
+    res.status(400).json({ error: '不支持的集成类型' });
+  } catch (error) {
+    console.error('测试集成连接失败:', error);
+    res.status(500).json({ error: '连接测试失败' });
+  }
+});
+
+// ==================== 服务启动 ====================
+
+// 下载页面
+app.get('/download', (req, res) => {
+  res.sendFile(path.join(__dirname, 'download.html'));
+});
+
+// 初始化数据库（创建默认管理员）
+async function initDatabase() {
+  try {
+    // 检查是否存在管理员
+    const [rows] = await pool.execute("SELECT id FROM users WHERE phone = '19909096066'");
+    if (rows.length === 0) {
+      const id = uuidv4();
+      const hashedPassword = bcrypt.hashSync('admin123', 10);
+      await pool.execute(
+        'INSERT INTO users (id, phone, name, password, role, is_active, created_at) VALUES (?, ?, ?, ?, ?, 1, NOW())',
+        [id, '19909096066', '管理员', hashedPassword, 'admin']
+      );
+      console.log('默认管理员创建成功: 19909096066 / admin123');
+    }
+    console.log('数据库初始化完成');
+  } catch (error) {
+    console.error('数据库初始化错误:', error);
+  }
+}
+
+// ==================== 飞书适配器 ====================
+
+// 获取飞书配置
+async function getFeishuConfig() {
+  try {
+    const [rows] = await pool.execute(
+      'SELECT config FROM integration_config WHERE type = "feishu" AND enabled = TRUE'
+    );
+    if (rows.length > 0) {
+      return rows[0].config;
+    }
+  } catch (e) {
+    console.error('获取飞书配置失败:', e);
+  }
+  return null;
+}
+
+// 获取飞书 tenant_access_token
+async function getFeishuToken() {
+  const config = await getFeishuConfig();
+  if (!config) return null;
+  
+  try {
+    const response = await fetch('https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        app_id: config.appId,
+        app_secret: config.appSecret
+      })
+    });
+    
+    const data = await response.json();
+    if (data.code === 0) {
+      return data.tenant_access_token;
+    }
+  } catch (e) {
+    console.error('获取飞书token失败:', e);
+  }
+  return null;
+}
+
+// 发送飞书消息
+async function sendFeishuMessage(receiveId, message, msgType = 'text') {
+  const token = await getFeishuToken();
+  if (!token) return false;
+  
+  try {
+    let content;
+    if (msgType === 'text') {
+      content = JSON.stringify({ text: message });
+    } else {
+      content = JSON.stringify(message);
+    }
+    
+    await fetch('https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=user_id', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        receive_id: receiveId,
+        msg_type: msgType,
+        content: content
+      })
+    });
+    return true;
+  } catch (e) {
+    console.error('发送飞书消息失败:', e);
+    return false;
+  }
+}
+
+// 飞书事件回调
+app.post('/api/feishu/webhook', async (req, res) => {
+  const { type, event, challenge } = req.body;
+  
+  // URL 验证
+  if (type === 'url_verification') {
+    return res.json({ challenge });
+  }
+  
+  // 处理消息事件
+  if (event?.type === 'im.message.receive_msg') {
+    const message = event.message;
+    const senderId = event.sender?.sender_id?.user_id;
+    
+    try {
+      let userMessage = '';
+      if (message.message_type === 'text') {
+        userMessage = JSON.parse(message.content).text;
+      }
+      
+      if (userMessage) {
+        // 简单回复（AI 功能已移除）
+        const response = '感谢您的消息，智能助手功能暂未开启，请联系管理员。';
+        await sendFeishuMessage(senderId, response);
+      }
+    } catch (e) {
+      console.error('处理飞书消息失败:', e);
+    }
+  }
+  
+  res.json({ success: true });
+});
+
+// ==================== 企业微信适配器 ====================
+
+// 获取企业微信配置
+async function getWechatWorkConfig() {
+  try {
+    const [rows] = await pool.execute(
+      'SELECT config FROM integration_config WHERE type = "wechat_work" AND enabled = TRUE'
+    );
+    if (rows.length > 0) {
+      return rows[0].config;
+    }
+  } catch (e) {
+    console.error('获取企业微信配置失败:', e);
+  }
+  return null;
+}
+
+// 获取企业微信 access_token
+async function getWechatWorkToken() {
+  const config = await getWechatWorkConfig();
+  if (!config) return null;
+  
+  try {
+    const response = await fetch(
+      `https://qyapi.weixin.qq.com/cgi-bin/gettoken?corpid=${config.corpId}&corpsecret=${config.agentSecret}`
+    );
+    
+    const data = await response.json();
+    if (data.errcode === 0) {
+      return data.access_token;
+    }
+  } catch (e) {
+    console.error('获取企业微信token失败:', e);
+  }
+  return null;
+}
+
+// 发送企业微信消息
+async function sendWechatWorkMessage(userId, message) {
+  const token = await getWechatWorkToken();
+  const config = await getWechatWorkConfig();
+  if (!token || !config) return false;
+  
+  try {
+    await fetch(`https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token=${token}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        touser: userId,
+        msgtype: 'text',
+        agentid: config.agentId,
+        text: { content: message }
+      })
+    });
+    return true;
+  } catch (e) {
+    console.error('发送企业微信消息失败:', e);
+    return false;
+  }
+}
+
+// 企业微信回调（需要 XML 解析）
+app.post('/api/wechat-work/webhook', express.urlencoded({ extended: false }), async (req, res) => {
+  const xml = req.body;
+  
+  // 简单解析 XML（生产环境建议使用专业的 XML 解析库）
+  const parseXml = (xmlStr) => {
+    const result = {};
+    const regex = /<(\w+)><!\[CDATA\[(.*?)\]\]><\/\1>|<(\w+)>(.*?)<\/\3>/g;
+    let match;
+    while ((match = regex.exec(xmlStr)) !== null) {
+      const key = match[1] || match[3];
+      const value = match[2] || match[4];
+      if (key && value) result[key] = value;
+    }
+    return result;
+  };
+  
+  const data = parseXml(xml);
+  
+  // 验证模式
+  if (data.MsgType === 'event' && data.Event === 'subscribe') {
+    const reply = `<xml>
+      <ToUserName><![CDATA[${data.FromUserName}]]></ToUserName>
+      <FromUserName><![CDATA[${data.ToUserName}]]></FromUserName>
+      <CreateTime>${Date.now()}</CreateTime>
+      <MsgType><![CDATA[text]]></MsgType>
+      <Content><![CDATA[欢迎关注仓储管理助手！]]></Content>
+    </xml>`;
+    return res.send(reply);
+  }
+  
+  // 处理文本消息
+  if (data.MsgType === 'text') {
+    const userMessage = data.Content;
+    const userId = data.FromUserName;
+    
+    try {
+      // 简单回复（AI 功能已移除）
+      const response = '感谢您的消息，智能助手功能暂未开启，请联系管理员。';
+      
+      // 回复消息
+      const reply = `<xml>
+        <ToUserName><![CDATA[${data.FromUserName}]]></ToUserName>
+        <FromUserName><![CDATA[${data.ToUserName}]]></FromUserName>
+        <CreateTime>${Date.now()}</CreateTime>
+        <MsgType><![CDATA[text]]></MsgType>
+        <Content><![CDATA[${response}]]></Content>
+      </xml>`;
+      return res.send(reply);
+    } catch (e) {
+      console.error('处理企业微信消息失败:', e);
+    }
+  }
+  
+  res.send('success');
+});
+
+// 企业微信验证接口
+app.get('/api/wechat-work/webhook', (req, res) => {
+  const { msg_signature, timestamp, nonce, echostr } = req.query;
+  // 这里应该验证签名，简化处理直接返回
+  res.send(echostr);
+});
+
+// ==================== 企业微信机器人管理系统 API ====================
+
+// 消息类型枚举
+const MESSAGE_TYPES = {
+  STOCK_IN: 'stock_in',           // 入库通知
+  STOCK_OUT: 'stock_out',         // 出库通知
+  STOCK_WARNING: 'stock_warning', // 库存预警
+  QC_RESULT: 'qc_result',         // 质检结果
+  SYSTEM: 'system',               // 系统通知
+  ALL: 'all'                      // 全部类型
+};
+
+// 消息队列（用于高并发处理）
+const messageQueue = [];
+let isProcessingQueue = false;
+
+// 初始化企业微信机器人管理表
+async function initWeChatBotTable() {
+  try {
+    // 机器人配置表
+    await pool.execute(`
+      CREATE TABLE IF NOT EXISTS wechat_bots (
+        id VARCHAR(36) PRIMARY KEY,
+        name VARCHAR(100) NOT NULL,
+        webhook_url TEXT NOT NULL,
+        description TEXT,
+        enabled BOOLEAN DEFAULT TRUE,
+        daily_limit INT DEFAULT 1000,
+        sent_today INT DEFAULT 0,
+        last_reset_date DATE,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `);
+
+    // 群聊表
+    await pool.execute(`
+      CREATE TABLE IF NOT EXISTS wechat_groups (
+        id VARCHAR(36) PRIMARY KEY,
+        bot_id VARCHAR(36) NOT NULL,
+        group_name VARCHAR(200) NOT NULL,
+        group_id VARCHAR(100),
+        webhook_url TEXT,
+        enabled BOOLEAN DEFAULT TRUE,
+        mention_list TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        INDEX idx_bot_id (bot_id),
+        FOREIGN KEY (bot_id) REFERENCES wechat_bots(id) ON DELETE CASCADE
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `);
+
+    // 消息分发规则表
+    await pool.execute(`
+      CREATE TABLE IF NOT EXISTS wechat_message_rules (
+        id VARCHAR(36) PRIMARY KEY,
+        name VARCHAR(100) NOT NULL,
+        message_type VARCHAR(50) NOT NULL,
+        group_ids TEXT NOT NULL,
+        keyword_filter TEXT,
+        tag_filter TEXT,
+        priority INT DEFAULT 0,
+        enabled BOOLEAN DEFAULT TRUE,
+        template TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        INDEX idx_message_type (message_type)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `);
+
+    // 消息发送日志表
+    await pool.execute(`
+      CREATE TABLE IF NOT EXISTS wechat_message_logs (
+        id VARCHAR(36) PRIMARY KEY,
+        bot_id VARCHAR(36),
+        group_id VARCHAR(36),
+        message_type VARCHAR(50),
+        content TEXT,
+        status ENUM('success', 'failed') DEFAULT 'success',
+        error_message TEXT,
+        sent_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_sent_at (sent_at),
+        INDEX idx_bot_id (bot_id)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `);
+
+    console.log('企业微信机器人管理表初始化完成');
+  } catch (error) {
+    console.error('初始化企业微信机器人管理表失败:', error);
+  }
+}
+
+// ==================== 机器人管理 API ====================
+
+// 获取所有机器人
+app.get('/api/wechat-bot/bots', authenticateToken, async (req, res) => {
+  try {
+    const [bots] = await pool.execute(`
+      SELECT b.*, 
+        (SELECT COUNT(*) FROM wechat_groups g WHERE g.bot_id = b.id) as group_count
+      FROM wechat_bots b
+      ORDER BY b.created_at DESC
+    `);
+    res.json({ bots });
+  } catch (error) {
+    console.error('获取机器人列表失败:', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 创建机器人
+app.post('/api/wechat-bot/bots', authenticateToken, async (req, res) => {
+  const { name, webhook_url, description, enabled, daily_limit } = req.body;
+  
+  if (!name || !webhook_url) {
+    return res.status(400).json({ error: '名称和Webhook URL不能为空' });
+  }
+  
+  if (!webhook_url.startsWith('https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=')) {
+    return res.status(400).json({ error: 'Webhook URL格式不正确' });
+  }
+  
+  try {
+    const id = uuidv4();
+    await pool.execute(`
+      INSERT INTO wechat_bots (id, name, webhook_url, description, enabled, daily_limit)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `, [id, name, webhook_url, description || null, enabled ?? true, daily_limit || 1000]);
+    
+    res.json({ success: true, message: '机器人创建成功', id });
+  } catch (error) {
+    console.error('创建机器人失败:', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 更新机器人
+app.put('/api/wechat-bot/bots/:id', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  const { name, webhook_url, description, enabled, daily_limit } = req.body;
+  
+  try {
+    await pool.execute(`
+      UPDATE wechat_bots 
+      SET name = ?, webhook_url = ?, description = ?, enabled = ?, daily_limit = ?
+      WHERE id = ?
+    `, [name, webhook_url, description, enabled, daily_limit, id]);
+    
+    res.json({ success: true, message: '更新成功' });
+  } catch (error) {
+    console.error('更新机器人失败:', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 删除机器人
+app.delete('/api/wechat-bot/bots/:id', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  
+  try {
+    await pool.execute('DELETE FROM wechat_bots WHERE id = ?', [id]);
+    res.json({ success: true, message: '删除成功' });
+  } catch (error) {
+    console.error('删除机器人失败:', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 测试机器人
+app.post('/api/wechat-bot/bots/:id/test', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  
+  try {
+    const [bots] = await pool.execute('SELECT * FROM wechat_bots WHERE id = ?', [id]);
+    if (bots.length === 0) {
+      return res.status(404).json({ error: '机器人不存在' });
+    }
+    
+    const bot = bots[0];
+    const testMessage = {
+      msgtype: 'markdown',
+      markdown: {
+        content: `## 🤖 测试消息\n\n> 来自机器人: **${bot.name}**\n\n**测试时间:** ${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}\n\n**状态:** ✅ 配置成功`
+      }
+    };
+    
+    const response = await fetch(bot.webhook_url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(testMessage)
+    });
+    
+    const result = await response.json();
+    
+    if (result.errcode === 0) {
+      res.json({ success: true, message: '测试消息发送成功' });
+    } else {
+      res.json({ success: false, error: result.errmsg || '发送失败' });
+    }
+  } catch (error) {
+    console.error('测试机器人失败:', error);
+    res.status(500).json({ error: '测试发送失败' });
+  }
+});
+
+// ==================== 群聊管理 API ====================
+
+// 获取机器人的群聊列表
+app.get('/api/wechat-bot/groups', authenticateToken, async (req, res) => {
+  const { bot_id } = req.query;
+  
+  try {
+    let query = `
+      SELECT g.*, b.name as bot_name
+      FROM wechat_groups g
+      LEFT JOIN wechat_bots b ON g.bot_id = b.id
+    `;
+    const params = [];
+    
+    if (bot_id) {
+      query += ' WHERE g.bot_id = ?';
+      params.push(bot_id);
+    }
+    
+    query += ' ORDER BY g.created_at DESC';
+    
+    const [groups] = await pool.execute(query, params);
+    res.json({ groups });
+  } catch (error) {
+    console.error('获取群聊列表失败:', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 创建群聊
+app.post('/api/wechat-bot/groups', authenticateToken, async (req, res) => {
+  const { bot_id, group_name, group_id, webhook_url, enabled, mention_list } = req.body;
+  
+  if (!bot_id || !group_name) {
+    return res.status(400).json({ error: '机器人和群名称不能为空' });
+  }
+  
+  try {
+    const id = uuidv4();
+    await pool.execute(`
+      INSERT INTO wechat_groups (id, bot_id, group_name, group_id, webhook_url, enabled, mention_list)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `, [id, bot_id, group_name, group_id || null, webhook_url || null, enabled ?? true, mention_list || null]);
+    
+    res.json({ success: true, message: '群聊创建成功', id });
+  } catch (error) {
+    console.error('创建群聊失败:', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 更新群聊
+app.put('/api/wechat-bot/groups/:id', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  const { group_name, group_id, webhook_url, enabled, mention_list } = req.body;
+  
+  try {
+    await pool.execute(`
+      UPDATE wechat_groups 
+      SET group_name = ?, group_id = ?, webhook_url = ?, enabled = ?, mention_list = ?
+      WHERE id = ?
+    `, [group_name, group_id, webhook_url, enabled, mention_list, id]);
+    
+    res.json({ success: true, message: '更新成功' });
+  } catch (error) {
+    console.error('更新群聊失败:', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 删除群聊
+app.delete('/api/wechat-bot/groups/:id', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  
+  try {
+    await pool.execute('DELETE FROM wechat_groups WHERE id = ?', [id]);
+    res.json({ success: true, message: '删除成功' });
+  } catch (error) {
+    console.error('删除群聊失败:', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// ==================== 分发规则 API ====================
+
+// 获取分发规则列表
+app.get('/api/wechat-bot/rules', authenticateToken, async (req, res) => {
+  try {
+    const [rules] = await pool.execute(`
+      SELECT r.*,
+        (SELECT JSON_ARRAYAGG(JSON_OBJECT('id', g.id, 'name', g.group_name))
+         FROM wechat_groups g
+         WHERE FIND_IN_SET(g.id, r.group_ids) > 0) as target_groups
+      FROM wechat_message_rules r
+      ORDER BY r.priority DESC, r.created_at DESC
+    `);
+    
+    // 解析 target_groups
+    const parsedRules = rules.map(rule => ({
+      ...rule,
+      target_groups: rule.target_groups ? JSON.parse(rule.target_groups) : []
+    }));
+    
+    res.json({ rules: parsedRules });
+  } catch (error) {
+    console.error('获取分发规则失败:', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 创建分发规则
+app.post('/api/wechat-bot/rules', authenticateToken, async (req, res) => {
+  const { name, message_type, group_ids, keyword_filter, tag_filter, priority, enabled, template } = req.body;
+  
+  if (!name || !message_type || !group_ids) {
+    return res.status(400).json({ error: '规则名称、消息类型和目标群组不能为空' });
+  }
+  
+  try {
+    const id = uuidv4();
+    await pool.execute(`
+      INSERT INTO wechat_message_rules (id, name, message_type, group_ids, keyword_filter, tag_filter, priority, enabled, template)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `, [id, name, message_type, Array.isArray(group_ids) ? group_ids.join(',') : group_ids, 
+        keyword_filter || null, tag_filter || null, priority || 0, enabled ?? true, template || null]);
+    
+    res.json({ success: true, message: '规则创建成功', id });
+  } catch (error) {
+    console.error('创建分发规则失败:', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 更新分发规则
+app.put('/api/wechat-bot/rules/:id', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  const { name, message_type, group_ids, keyword_filter, tag_filter, priority, enabled, template } = req.body;
+  
+  try {
+    await pool.execute(`
+      UPDATE wechat_message_rules 
+      SET name = ?, message_type = ?, group_ids = ?, keyword_filter = ?, tag_filter = ?, priority = ?, enabled = ?, template = ?
+      WHERE id = ?
+    `, [name, message_type, Array.isArray(group_ids) ? group_ids.join(',') : group_ids,
+        keyword_filter, tag_filter, priority, enabled, template, id]);
+    
+    res.json({ success: true, message: '更新成功' });
+  } catch (error) {
+    console.error('更新分发规则失败:', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 删除分发规则
+app.delete('/api/wechat-bot/rules/:id', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  
+  try {
+    await pool.execute('DELETE FROM wechat_message_rules WHERE id = ?', [id]);
+    res.json({ success: true, message: '删除成功' });
+  } catch (error) {
+    console.error('删除分发规则失败:', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// ==================== 消息发送与队列处理 ====================
+
+// 发送消息到企业微信（核心函数）
+async function sendToWeChat(webhookUrl, content, options = {}) {
+  const { messageFormat = 'markdown', mentionList = [] } = options;
+  
+  const message = messageFormat === 'markdown' ? {
+    msgtype: 'markdown',
+    markdown: {
+      content: content,
+      mentioned_list: mentionList
+    }
+  } : {
+    msgtype: 'text',
+    text: {
+      content: content,
+      mentioned_list: mentionList
+    }
+  };
+  
+  const response = await fetch(webhookUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(message)
+  });
+  
+  return await response.json();
+}
+
+// 处理消息队列
+async function processMessageQueue() {
+  if (isProcessingQueue || messageQueue.length === 0) return;
+  
+  isProcessingQueue = true;
+  
+  while (messageQueue.length > 0) {
+    const task = messageQueue.shift();
+    try {
+      await task();
+    } catch (error) {
+      console.error('处理消息任务失败:', error);
+    }
+    // 防止频率过高，每条消息间隔100ms
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  
+  isProcessingQueue = false;
+}
+
+// 根据规则分发消息（高并发版本）
+async function dispatchMessage(messageType, content, options = {}) {
+  const { tags = [], keywords = [], template = null } = options;
+  
+  try {
+    // 获取匹配的规则
+    const [rules] = await pool.execute(`
+      SELECT * FROM wechat_message_rules 
+      WHERE enabled = TRUE 
+      AND (message_type = ? OR message_type = 'all')
+      ORDER BY priority DESC
+    `, [messageType]);
+    
+    if (rules.length === 0) {
+      console.log(`没有找到匹配的分发规则: ${messageType}`);
+      return { success: false, message: '没有匹配的规则' };
+    }
+    
+    const results = [];
+    
+    for (const rule of rules) {
+      // 关键词过滤
+      if (rule.keyword_filter) {
+        const filterKeywords = rule.keyword_filter.split(',').map(k => k.trim());
+        const hasKeyword = keywords.some(k => filterKeywords.includes(k)) || 
+                          filterKeywords.some(k => content.includes(k));
+        if (!hasKeyword) continue;
+      }
+      
+      // 标签过滤
+      if (rule.tag_filter) {
+        const filterTags = rule.tag_filter.split(',').map(t => t.trim());
+        const hasTag = tags.some(t => filterTags.includes(t));
+        if (!hasTag) continue;
+      }
+      
+      // 获取目标群组
+      const groupIds = rule.group_ids.split(',');
+      const [groups] = await pool.execute(`
+        SELECT g.*, b.webhook_url as bot_webhook, b.name as bot_name, b.daily_limit, b.sent_today, b.last_reset_date
+        FROM wechat_groups g
+        LEFT JOIN wechat_bots b ON g.bot_id = b.id
+        WHERE g.id IN (${groupIds.map(() => '?').join(',')}) AND g.enabled = TRUE
+      `, groupIds);
+      
+      for (const group of groups) {
+        // 检查每日限额
+        const today = new Date().toISOString().split('T')[0];
+        if (group.last_reset_date !== today) {
+          await pool.execute('UPDATE wechat_bots SET sent_today = 0, last_reset_date = ? WHERE id = ?', [today, group.bot_id]);
+          group.sent_today = 0;
+        }
+        
+        if (group.sent_today >= group.daily_limit) {
+          console.log(`机器人 ${group.bot_name} 已达每日限额`);
+          continue;
+        }
+        
+        // 使用群组专属webhook或机器人webhook
+        const webhookUrl = group.webhook_url || group.bot_webhook;
+        const mentionList = group.mention_list ? group.mention_list.split(',').map(s => s.trim()) : [];
+        
+        // 应用模板
+        let finalContent = content;
+        if (rule.template) {
+          finalContent = rule.template
+            .replace('{content}', content)
+            .replace('{time}', new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }));
+        }
+        
+        // 添加到消息队列
+        messageQueue.push(async () => {
+          try {
+            const result = await sendToWeChat(webhookUrl, finalContent, { mentionList });
+            
+            // 记录日志
+            const logId = uuidv4();
+            await pool.execute(`
+              INSERT INTO wechat_message_logs (id, bot_id, group_id, message_type, content, status)
+              VALUES (?, ?, ?, ?, ?, ?)
+            `, [logId, group.bot_id, group.id, messageType, finalContent.substring(0, 500), 
+                result.errcode === 0 ? 'success' : 'failed']);
+            
+            if (result.errcode === 0) {
+              // 更新发送计数
+              await pool.execute('UPDATE wechat_bots SET sent_today = sent_today + 1 WHERE id = ?', [group.bot_id]);
+              console.log(`消息发送成功: ${group.group_name}`);
+            } else {
+              console.error(`消息发送失败: ${group.group_name}`, result.errmsg);
+            }
+          } catch (err) {
+            console.error(`发送异常: ${group.group_name}`, err);
+          }
+        });
+        
+        results.push({ groupId: group.id, groupName: group.group_name });
+      }
+    }
+    
+    // 触发队列处理
+    processMessageQueue();
+    
+    return { success: true, dispatched: results.length, groups: results };
+  } catch (error) {
+    console.error('分发消息失败:', error);
+    return { success: false, error: '分发失败' };
+  }
+}
+
+// API: 发送消息（根据规则分发）
+app.post('/api/wechat-bot/send', authenticateToken, async (req, res) => {
+  const { message_type, content, tags, keywords } = req.body;
+  
+  if (!content) {
+    return res.status(400).json({ error: '消息内容不能为空' });
+  }
+  
+  try {
+    const result = await dispatchMessage(message_type || 'system', content, { tags, keywords });
+    res.json(result);
+  } catch (error) {
+    console.error('发送消息失败:', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// API: 直接发送到指定群
+app.post('/api/wechat-bot/send-direct', authenticateToken, async (req, res) => {
+  const { group_id, content, message_format } = req.body;
+  
+  if (!group_id || !content) {
+    return res.status(400).json({ error: '群组ID和消息内容不能为空' });
+  }
+  
+  try {
+    const [groups] = await pool.execute(`
+      SELECT g.*, b.webhook_url as bot_webhook
+      FROM wechat_groups g
+      LEFT JOIN wechat_bots b ON g.bot_id = b.id
+      WHERE g.id = ?
+    `, [group_id]);
+    
+    if (groups.length === 0) {
+      return res.status(404).json({ error: '群组不存在' });
+    }
+    
+    const group = groups[0];
+    const webhookUrl = group.webhook_url || group.bot_webhook;
+    const mentionList = group.mention_list ? group.mention_list.split(',').map(s => s.trim()) : [];
+    
+    const result = await sendToWeChat(webhookUrl, content, { 
+      messageFormat: message_format || 'markdown', 
+      mentionList 
+    });
+    
+    if (result.errcode === 0) {
+      res.json({ success: true, message: '发送成功' });
+    } else {
+      res.json({ success: false, error: result.errmsg });
+    }
+  } catch (error) {
+    console.error('直接发送失败:', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// API: 获取消息发送日志
+app.get('/api/wechat-bot/logs', authenticateToken, async (req, res) => {
+  const { bot_id, group_id, limit = 100 } = req.query;
+  
+  try {
+    let query = `
+      SELECT l.*, b.name as bot_name, g.group_name
+      FROM wechat_message_logs l
+      LEFT JOIN wechat_bots b ON l.bot_id = b.id
+      LEFT JOIN wechat_groups g ON l.group_id = g.id
+    `;
+    const conditions = [];
+    const params = [];
+    
+    if (bot_id) {
+      conditions.push('l.bot_id = ?');
+      params.push(bot_id);
+    }
+    if (group_id) {
+      conditions.push('l.group_id = ?');
+      params.push(group_id);
+    }
+    
+    if (conditions.length > 0) {
+      query += ' WHERE ' + conditions.join(' AND ');
+    }
+    
+    query += ' ORDER BY l.sent_at DESC LIMIT ?';
+    params.push(parseInt(limit));
+    
+    const [logs] = await pool.execute(query, params);
+    res.json({ logs });
+  } catch (error) {
+    console.error('获取日志失败:', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// API: 获取统计数据
+app.get('/api/wechat-bot/stats', authenticateToken, async (req, res) => {
+  try {
+    const today = new Date().toISOString().split('T')[0];
+    
+    const [bots] = await pool.execute('SELECT COUNT(*) as count FROM wechat_bots');
+    const [groups] = await pool.execute('SELECT COUNT(*) as count FROM wechat_groups');
+    const [rules] = await pool.execute('SELECT COUNT(*) as count FROM wechat_message_rules WHERE enabled = TRUE');
+    const [todayLogs] = await pool.execute(`
+      SELECT COUNT(*) as count FROM wechat_message_logs 
+      WHERE DATE(sent_at) = ? AND status = 'success'
+    `, [today]);
+    
+    res.json({
+      bots: bots[0].count,
+      groups: groups[0].count,
+      rules: rules[0].count,
+      todayMessages: todayLogs[0].count
+    });
+  } catch (error) {
+    console.error('获取统计失败:', error);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 兼容旧API：获取/保存配置
+app.get('/api/wechat-bot/config', authenticateToken, async (req, res) => {
+  try {
+    const [bots] = await pool.execute('SELECT * FROM wechat_bots ORDER BY created_at DESC');
+    res.json({ configs: bots });
+  } catch (error) {
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+app.post('/api/wechat-bot/config', authenticateToken, async (req, res) => {
+  const { name, webhook_url, enabled, keyword_filter, message_format, mention_list } = req.body;
+  
+  if (!webhook_url) {
+    return res.status(400).json({ error: 'Webhook URL不能为空' });
+  }
+  
+  try {
+    const id = uuidv4();
+    await pool.execute(`
+      INSERT INTO wechat_bots (id, name, webhook_url, enabled)
+      VALUES (?, ?, ?, ?)
+    `, [id, name || '默认机器人', webhook_url, enabled ?? true]);
+    
+    res.json({ success: true, message: '配置保存成功', id });
+  } catch (error) {
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 兼容旧API：测试
+app.post('/api/wechat-bot/test', authenticateToken, async (req, res) => {
+  const { webhook_url, message_format } = req.body;
+  
+  if (!webhook_url) {
+    return res.status(400).json({ error: 'Webhook URL不能为空' });
+  }
+  
+  try {
+    const testMessage = message_format === 'markdown' ? {
+      msgtype: 'markdown',
+      markdown: {
+        content: `## 🤖 系统测试消息\n\n> 这是来自无纺布管理系统的测试消息\n\n**测试时间:** ${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}\n\n**状态:** ✅ 配置成功`
+      }
+    } : {
+      msgtype: 'text',
+      text: {
+        content: `【系统测试消息】\n这是来自无纺布管理系统的测试消息\n测试时间: ${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}\n状态: 配置成功`
+      }
+    };
+    
+    const response = await fetch(webhook_url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(testMessage)
+    });
+    
+    const result = await response.json();
+    
+    if (result.errcode === 0) {
+      res.json({ success: true, message: '测试消息发送成功' });
+    } else {
+      res.json({ success: false, error: result.errmsg || '发送失败' });
+    }
+  } catch (error) {
+    res.status(500).json({ error: '测试发送失败' });
+  }
+});
+
+// 启动服务器
+app.listen(PORT, '0.0.0.0', async () => {
+  await initDatabase();
+  await initIntegrationConfigTable();
+  await initWeChatBotTable();
+  console.log(`服务器运行在 http://0.0.0.0:${PORT}`);
+  console.log(`API地址: http://81.70.90.164:${PORT}/api`);
+  console.log(`飞书回调地址: http://81.70.90.164:${PORT}/api/feishu/webhook`);
+  console.log(`企业微信回调地址: http://81.70.90.164:${PORT}/api/wechat-work/webhook`);
+});

@@ -1,8 +1,31 @@
 import { cn } from '@/lib/utils'
-import { type UseSupabaseUploadReturn } from '@/hooks/use-supabase-upload'
 import { Button } from '@/components/ui/button'
 import { CheckCircle, File, Loader2, Upload, X } from 'lucide-react'
 import { createContext, type PropsWithChildren, useCallback, useContext } from 'react'
+
+// 简化的上传类型定义
+interface FileWithPreview extends File {
+  preview?: string;
+  errors: readonly { message: string }[];
+}
+
+interface UseServerUploadReturn {
+  files: FileWithPreview[];
+  setFiles: (files: FileWithPreview[]) => void;
+  successes: string[];
+  isSuccess: boolean;
+  loading: boolean;
+  errors: { name: string; message: string }[];
+  setErrors: (errors: { name: string; message: string }[]) => void;
+  onUpload: () => Promise<void>;
+  maxFileSize: number;
+  maxFiles: number;
+  isDragActive: boolean;
+  isDragReject: boolean;
+  getRootProps: (props?: any) => any;
+  getInputProps: (props?: any) => any;
+  inputRef: React.RefObject<HTMLInputElement>;
+}
 
 export const formatBytes = (
   bytes: number,
@@ -18,11 +41,11 @@ export const formatBytes = (
   return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i]
 }
 
-type DropzoneContextType = Omit<UseSupabaseUploadReturn, 'getRootProps' | 'getInputProps'>
+type DropzoneContextType = Omit<UseServerUploadReturn, 'getRootProps' | 'getInputProps'>
 
 const DropzoneContext = createContext<DropzoneContextType | undefined>(undefined)
 
-type DropzoneProps = UseSupabaseUploadReturn & {
+type DropzoneProps = UseServerUploadReturn & {
   className?: string
 }
 

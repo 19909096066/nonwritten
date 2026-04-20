@@ -9,74 +9,129 @@ All colors MUST be HSL.
 
 @layer base {
   :root {
-    --radius: 0.5rem;
-    --background: 210 20% 98%;
-    --foreground: 215 25% 15%;
+    --radius: 0.75rem;
+    
+    /* Modern Light Theme */
+    --background: 220 20% 97%;
+    --foreground: 220 25% 10%;
     --card: 0 0% 100%;
-    --card-foreground: 215 25% 15%;
+    --card-foreground: 220 25% 10%;
     --popover: 0 0% 100%;
-    --popover-foreground: 215 25% 15%;
-    --primary: 217 91% 60%;
+    --popover-foreground: 220 25% 10%;
+    
+    /* Primary: Modern Blue */
+    --primary: 221 83% 53%;
     --primary-foreground: 0 0% 100%;
-    --secondary: 210 17% 92%;
-    --secondary-foreground: 215 25% 15%;
-    --muted: 210 17% 95%;
-    --muted-foreground: 215 15% 50%;
-    --accent: 210 17% 93%;
-    --accent-foreground: 215 25% 15%;
+    
+    /* Secondary: Soft Gray */
+    --secondary: 220 14% 96%;
+    --secondary-foreground: 220 25% 20%;
+    
+    /* Muted: Subtle Gray */
+    --muted: 220 14% 96%;
+    --muted-foreground: 220 15% 45%;
+    
+    /* Accent: Light Blue */
+    --accent: 210 100% 97%;
+    --accent-foreground: 221 83% 53%;
+    
+    /* Destructive: Modern Red */
     --destructive: 0 72% 51%;
     --destructive-foreground: 0 0% 100%;
-    --border: 214 20% 88%;
-    --input: 214 20% 88%;
-    --ring: 217 91% 60%;
-    --chart-1: 217 91% 60%;
+    
+    /* Borders & Inputs */
+    --border: 220 13% 91%;
+    --input: 220 13% 91%;
+    --ring: 221 83% 53%;
+    
+    /* Success, Warning, Info */
+    --success: 142 76% 36%;
+    --warning: 38 92% 50%;
+    --info: 199 89% 48%;
+    
+    /* Chart Colors */
+    --chart-1: 221 83% 53%;
     --chart-2: 142 76% 36%;
     --chart-3: 38 92% 50%;
     --chart-4: 280 67% 55%;
     --chart-5: 340 82% 52%;
+    
+    /* Sidebar: Clean White */
     --sidebar-background: 0 0% 100%;
-    --sidebar-foreground: 215 20% 25%;
-    --sidebar-primary: 217 91% 60%;
+    --sidebar-foreground: 220 25% 20%;
+    --sidebar-primary: 221 83% 53%;
     --sidebar-primary-foreground: 0 0% 100%;
-    --sidebar-accent: 210 17% 95%;
-    --sidebar-accent-foreground: 215 25% 15%;
-    --sidebar-border: 214 20% 90%;
-    --sidebar-ring: 217 91% 60%;
+    --sidebar-accent: 220 14% 96%;
+    --sidebar-accent-foreground: 221 83% 53%;
+    --sidebar-border: 220 13% 91%;
+    --sidebar-ring: 221 83% 53%;
+    
+    /* Custom Shadows */
+    --shadow-card: 0 1px 3px 0 rgb(0 0 0 / 0.04), 0 1px 2px -1px rgb(0 0 0 / 0.04);
+    --shadow-hover: 0 4px 6px -1px rgb(0 0 0 / 0.08), 0 2px 4px -2px rgb(0 0 0 / 0.08);
+    --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.08), 0 4px 6px -4px rgb(0 0 0 / 0.08);
   }
 
   .dark {
-    --background: 222 47% 11%;
-    --foreground: 210 40% 98%;
-    --card: 222 47% 14%;
-    --card-foreground: 210 40% 98%;
-    --popover: 222 47% 14%;
-    --popover-foreground: 210 40% 98%;
+    /* Modern Dark Theme */
+    --background: 220 20% 8%;
+    --foreground: 220 20% 95%;
+    --card: 220 20% 12%;
+    --card-foreground: 220 20% 95%;
+    --popover: 220 20% 12%;
+    --popover-foreground: 220 20% 95%;
+    
+    /* Primary: Bright Blue */
     --primary: 217 91% 60%;
-    --primary-foreground: 222 47% 11%;
-    --secondary: 217 33% 17%;
-    --secondary-foreground: 210 40% 98%;
-    --muted: 217 33% 17%;
-    --muted-foreground: 215 20% 65%;
-    --accent: 217 33% 20%;
-    --accent-foreground: 210 40% 98%;
+    --primary-foreground: 220 20% 8%;
+    
+    /* Secondary: Dark Gray */
+    --secondary: 220 15% 18%;
+    --secondary-foreground: 220 20% 90%;
+    
+    /* Muted: Dark Gray */
+    --muted: 220 15% 18%;
+    --muted-foreground: 220 15% 60%;
+    
+    /* Accent: Dark Blue */
+    --accent: 217 50% 20%;
+    --accent-foreground: 217 91% 60%;
+    
+    /* Destructive: Soft Red */
     --destructive: 0 63% 31%;
-    --destructive-foreground: 210 40% 98%;
-    --border: 217 33% 20%;
-    --input: 217 33% 20%;
+    --destructive-foreground: 0 0% 100%;
+    
+    /* Borders & Inputs */
+    --border: 220 15% 20%;
+    --input: 220 15% 20%;
     --ring: 217 91% 60%;
+    
+    /* Success, Warning, Info */
+    --success: 142 70% 45%;
+    --warning: 38 85% 55%;
+    --info: 199 85% 55%;
+    
+    /* Chart Colors */
     --chart-1: 217 91% 60%;
     --chart-2: 142 76% 45%;
     --chart-3: 38 92% 60%;
     --chart-4: 280 67% 65%;
     --chart-5: 340 82% 62%;
-    --sidebar-background: 222 47% 11%;
-    --sidebar-foreground: 210 40% 90%;
+    
+    /* Sidebar: Dark */
+    --sidebar-background: 220 20% 10%;
+    --sidebar-foreground: 220 20% 85%;
     --sidebar-primary: 217 91% 60%;
     --sidebar-primary-foreground: 0 0% 100%;
-    --sidebar-accent: 217 33% 17%;
-    --sidebar-accent-foreground: 210 40% 98%;
-    --sidebar-border: 217 33% 17%;
+    --sidebar-accent: 220 15% 18%;
+    --sidebar-accent-foreground: 217 91% 60%;
+    --sidebar-border: 220 15% 18%;
     --sidebar-ring: 217 91% 60%;
+    
+    /* Custom Shadows */
+    --shadow-card: 0 1px 3px 0 rgb(0 0 0 / 0.2), 0 1px 2px -1px rgb(0 0 0 / 0.2);
+    --shadow-hover: 0 4px 6px -1px rgb(0 0 0 / 0.3), 0 2px 4px -2px rgb(0 0 0 / 0.3);
+    --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.4), 0 4px 6px -4px rgb(0 0 0 / 0.4);
   }
 }
 
@@ -86,6 +141,309 @@ All colors MUST be HSL.
   }
 
   body {
-    @apply bg-background text-foreground;
+    @apply bg-background text-foreground antialiased;
+    font-feature-settings: "rlig" 1, "calt" 1;
+  }
+  
+  /* Smooth scrolling */
+  html {
+    scroll-behavior: smooth;
+  }
+  
+  /* Better focus styles */
+  :focus-visible {
+    @apply outline-none ring-2 ring-ring ring-offset-2 ring-offset-background;
+  }
+}
+
+@layer components {
+  /* Card hover effect */
+  .card-hover {
+    @apply transition-all duration-200 ease-out;
+    @apply hover:shadow-[var(--shadow-hover)] hover:-translate-y-0.5;
+  }
+  
+  /* Button gradient effect */
+  .btn-gradient {
+    @apply relative overflow-hidden;
+    background: linear-gradient(135deg, hsl(var(--primary)) 0%, hsl(221 83% 45%) 100%);
+  }
+  
+  .btn-gradient::before {
+    content: '';
+    @apply absolute inset-0 opacity-0 transition-opacity duration-300;
+    background: linear-gradient(135deg, hsl(221 83% 60%) 0%, hsl(221 83% 53%) 100%);
+  }
+  
+  .btn-gradient:hover::before {
+    @apply opacity-100;
+  }
+  
+  /* Glassmorphism effect for cards */
+  .glass {
+    @apply bg-white/80 backdrop-blur-sm;
+  }
+  
+  .dark .glass {
+    @apply bg-white/5 backdrop-blur-sm;
+  }
+  
+  /* Sidebar menu item active indicator */
+  .menu-active {
+    @apply relative;
+  }
+  
+  .menu-active::before {
+    content: '';
+    @apply absolute left-0 top-1/2 -translate-y-1/2 w-1 h-6 rounded-r-full bg-primary;
+  }
+  
+  /* Table row hover */
+  .table-row-hover {
+    @apply transition-colors duration-150;
+  }
+  
+  .table-row-hover:hover {
+    @apply bg-muted/50;
+  }
+  
+  /* Stats card gradient */
+  .stats-gradient {
+    background: linear-gradient(135deg, hsl(var(--card)) 0%, hsl(var(--muted)) 100%);
+  }
+  
+  /* Input focus glow */
+  .input-glow:focus {
+    @apply ring-2 ring-primary/20 ring-offset-0;
+    box-shadow: 0 0 0 3px hsl(var(--primary) / 0.1);
+  }
+  
+  /* Badge variants */
+  .badge-success {
+    @apply bg-emerald-50 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300;
+  }
+  
+  .badge-warning {
+    @apply bg-amber-50 text-amber-700 dark:bg-amber-950 dark:text-amber-300;
+  }
+  
+  .badge-danger {
+    @apply bg-red-50 text-red-700 dark:bg-red-950 dark:text-red-300;
+  }
+  
+  .badge-info {
+    @apply bg-sky-50 text-sky-700 dark:bg-sky-950 dark:text-sky-300;
+  }
+  
+  /* ========== 表格优化样式 ========== */
+  
+  /* 表格容器 */
+  .table-container {
+    @apply rounded-lg border border-slate-200 dark:border-slate-700 overflow-hidden;
+    box-shadow:
+      0 1px 3px 0 rgb(0 0 0 / 0.05),
+      0 1px 2px -1px rgb(0 0 0 / 0.05),
+      inset 0 1px 0 0 rgb(255 255 255 / 0.5);
+  }
+
+  .dark .table-container {
+    box-shadow:
+      0 1px 3px 0 rgb(0 0 0 / 0.15),
+      0 1px 2px -1px rgb(0 0 0 / 0.15);
+  }
+
+  /* 表格内部样式 - 自适应布局 */
+  .table-container table {
+    width: 100%;
+    min-width: max-content;
+  }
+
+  /* 允许换行的单元格 */
+  .table-container td.whitespace-normal,
+  .table-container th.whitespace-normal {
+    white-space: normal !important;
+    word-break: break-word;
+  }
+  
+  /* 表格行高亮效果 */
+  .table-row-highlight {
+    @apply relative;
+  }
+  
+  .table-row-highlight::before {
+    content: '';
+    @apply absolute left-0 top-0 bottom-0 w-0.5 bg-primary opacity-0 transition-opacity duration-200;
+  }
+  
+  .table-row-highlight:hover::before {
+    @apply opacity-100;
+  }
+  
+  /* 表格单元格截断 */
+  .table-cell-truncate {
+    @apply max-w-[200px] truncate;
+  }
+  
+  /* 表格数据状态标签 - 改进版 */
+  .table-status-badge {
+    @apply inline-flex items-center px-2.5 py-1 rounded-md text-xs font-medium;
+    @apply transition-colors duration-150;
+  }
+  
+  .table-status-success {
+    @apply bg-emerald-50 text-emerald-700 border border-emerald-200;
+    @apply dark:bg-emerald-950/40 dark:text-emerald-400 dark:border-emerald-800;
+  }
+  
+  .table-status-warning {
+    @apply bg-amber-50 text-amber-700 border border-amber-200;
+    @apply dark:bg-amber-950/40 dark:text-amber-400 dark:border-amber-800;
+  }
+  
+  .table-status-danger {
+    @apply bg-red-50 text-red-700 border border-red-200;
+    @apply dark:bg-red-950/40 dark:text-red-400 dark:border-red-800;
+  }
+  
+  .table-status-info {
+    @apply bg-blue-50 text-blue-700 border border-blue-200;
+    @apply dark:bg-blue-950/40 dark:text-blue-400 dark:border-blue-800;
+  }
+  
+  .table-status-neutral {
+    @apply bg-slate-100 text-slate-700 border border-slate-200;
+    @apply dark:bg-slate-800 dark:text-slate-300 dark:border-slate-700;
+  }
+  
+  /* 表格加载骨架屏 - 改进版 */
+  .table-skeleton {
+    @apply animate-pulse bg-gradient-to-r from-slate-200 via-slate-100 to-slate-200;
+    @apply dark:from-slate-700 dark:via-slate-600 dark:to-slate-700;
+    background-size: 200% 100%;
+    animation: skeleton-shimmer 1.5s ease-in-out infinite;
+  }
+  
+  @keyframes skeleton-shimmer {
+    0% { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+  }
+  
+  /* 表格合计行 - 改进版 */
+  .table-summary-row {
+    @apply bg-gradient-to-r from-slate-50 via-slate-100 to-slate-50;
+    @apply dark:from-slate-800/80 dark:via-slate-800 dark:to-slate-800/80;
+    @apply font-semibold text-slate-800 dark:text-slate-100;
+    @apply border-t-2 border-slate-300 dark:border-slate-600;
+  }
+  
+  /* 表格数字列对齐 */
+  .table-numeric {
+    @apply font-mono tabular-nums text-right;
+  }
+  
+  /* 表格固定列 */
+  .table-sticky-left {
+    @apply sticky left-0 z-20;
+    @apply bg-white dark:bg-slate-900;
+    @apply shadow-[2px_0_4px_-2px_rgba(0,0,0,0.05)];
+  }
+  
+  .table-sticky-right {
+    @apply sticky right-0 z-20;
+    @apply bg-white dark:bg-slate-900;
+    @apply shadow-[-2px_0_4px_-2px_rgba(0,0,0,0.05)];
+  }
+  
+  /* 表格响应式优化 */
+  @media (max-width: 1024px) {
+    .table-container {
+      @apply overflow-x-auto;
+    }
+    
+    .table-container table {
+      min-width: 800px;
+    }
+  }
+  
+  @media (max-width: 768px) {
+    .table-container table {
+      min-width: 600px;
+    }
+    
+    .table-status-badge {
+      @apply px-2 py-0.5 text-[10px];
+    }
+  }
+  
+  /* 表格空状态 */
+  .table-empty-state {
+    @apply flex flex-col items-center justify-center py-16 px-4;
+  }
+  
+  .table-empty-icon {
+    @apply w-16 h-16 rounded-full bg-slate-100 dark:bg-slate-800 flex items-center justify-center mb-4;
+  }
+  
+  /* 表格操作按钮组 */
+  .table-actions {
+    @apply flex items-center gap-2 justify-end;
+  }
+  
+  .table-action-btn {
+    @apply p-1.5 rounded-md text-slate-500 hover:text-slate-700 hover:bg-slate-100;
+    @apply dark:text-slate-400 dark:hover:text-slate-200 dark:hover:bg-slate-700;
+    @apply transition-colors duration-150;
+  }
+}
+
+@layer utilities {
+  /* Fade in animation */
+  .animate-fade-in {
+    animation: fade-in 0.3s ease-out;
+  }
+  
+  /* Slide up animation */
+  .animate-slide-up {
+    animation: slide-up 0.3s ease-out;
+  }
+  
+  @keyframes slide-up {
+    from {
+      opacity: 0;
+      transform: translateY(10px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+  
+  /* Gradient text */
+  .text-gradient {
+    @apply bg-clip-text text-transparent;
+    background-image: linear-gradient(135deg, hsl(var(--primary)) 0%, hsl(280 67% 55%) 100%);
+  }
+  
+  /* Scrollbar styling */
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: hsl(var(--muted)) transparent;
+  }
+  
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  
+  .scrollbar-thin::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    @apply bg-muted-foreground/20 rounded-full;
+  }
+  
+  .scrollbar-thin::-webkit-scrollbar-thumb:hover {
+    @apply bg-muted-foreground/40;
   }
 }

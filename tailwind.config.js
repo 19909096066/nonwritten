@@ -1,6 +1,6 @@
 import tailwindAnimate from 'tailwindcss-animate';
 import containerQuery from '@tailwindcss/container-queries';
-import intersect from 'tailwindcss-intersect';
+// import intersect from 'tailwindcss-intersect';
 
 export default {
     darkMode: ['class'],
@@ -149,7 +149,7 @@ export default {
     plugins: [
         tailwindAnimate,
         containerQuery,
-        intersect,
+        // intersect,
         function ({addUtilities}) {
             addUtilities(
                 {

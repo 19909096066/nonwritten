@@ -8,6 +8,7 @@ import {
   createOperationLog,
 } from '@/db/api';
 import type { QcPurchase } from '@/types';
+import DateQuickSelect from '@/components/common/DateQuickSelect';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Button } from '@/components/ui/button';
@@ -15,11 +16,10 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/u
 import { Label } from '@/components/ui/label';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Badge } from '@/components/ui/badge';
-import { Skeleton } from '@/components/ui/skeleton';
 import { Plus, RefreshCw, Search } from 'lucide-react';
 import { toast } from 'sonner';
 import { useAuth } from '@/contexts/AuthContext';
+import { cn } from '@/lib/utils';
 import {
   Pagination,
   PaginationContent,
@@ -42,6 +42,7 @@ export default function QcPurchasePage() {
   const [result, setResult] = useState('all');
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
+  const [dateQuickKey, setDateQuickKey] = useState('');
 
   const [batchOptions, setBatchOptions] = useState<string[]>([]);
   const [packageOptions, setPackageOptions] = useState<{ package_no: string; model: string }[]>([]);
@@ -170,19 +171,17 @@ export default function QcPurchasePage() {
 
     try {
       await createQcPurchase({
-        time: new Date().toISOString(),
         batch_no: newRecord.batch_no,
         package_no: newRecord.package_no,
         material_model: newRecord.material_model,
         weight: newRecord.weight,
         thickness: newRecord.thickness,
         result: newRecord.result,
-        reason: newRecord.reason || null,
-        inspector: profile?.name || '',
+        reason: newRecord.reason || undefined,
       });
 
       await createOperationLog({
-        operation_type: 'QC_ADD',
+        operation_type: 'qc_add',
         operator: profile?.name || '',
         detail: `添加采购质检记录：${newRecord.batch_no}-${newRecord.package_no}`,
       });
@@ -197,6 +196,12 @@ export default function QcPurchasePage() {
   };
 
   const totalPages = Math.ceil(total / pageSize);
+
+  const handleDateQuickSelect = (start: string, end: string) => {
+    setStartDate(start);
+    setEndDate(end);
+    setPage(1);
+  };
 
   return (
     <div className="space-y-4">
@@ -245,19 +250,24 @@ export default function QcPurchasePage() {
             <Input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} />
           </div>
 
-          <div className="border rounded-md">
+          <div className="flex items-center gap-2">
+            <span className="text-sm text-muted-foreground">快速选择：</span>
+            <DateQuickSelect onSelect={handleDateQuickSelect} activeKey={dateQuickKey} />
+          </div>
+
+          <div className="table-container">
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>检验时间</TableHead>
-                  <TableHead>批次号</TableHead>
-                  <TableHead>包号</TableHead>
-                  <TableHead>型号</TableHead>
-                  <TableHead>实测克重(g)</TableHead>
-                  <TableHead>实测厚度(mm)</TableHead>
-                  <TableHead>结果</TableHead>
+                  <TableHead className="w-[160px]" align="center">检验时间</TableHead>
+                  <TableHead className="w-[140px]">批次号</TableHead>
+                  <TableHead className="w-[100px]" align="center">包号</TableHead>
+                  <TableHead className="w-[140px]">型号</TableHead>
+                  <TableHead className="w-[120px]" align="right">实测克重(g)</TableHead>
+                  <TableHead className="w-[120px]" align="right">实测厚度(mm)</TableHead>
+                  <TableHead className="w-[100px]" align="center">结果</TableHead>
                   <TableHead>不合格原因</TableHead>
-                  <TableHead>质检员</TableHead>
+                  <TableHead className="w-[100px]" align="center">质检员</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -266,33 +276,36 @@ export default function QcPurchasePage() {
                     <TableRow key={i}>
                       {[...Array(9)].map((_, j) => (
                         <TableCell key={j}>
-                          <Skeleton className="h-4 w-full bg-muted" />
+                          <div className="table-skeleton h-4 w-full" />
                         </TableCell>
                       ))}
                     </TableRow>
                   ))
                 ) : records.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={9} className="text-center text-muted-foreground">
+                    <TableCell colSpan={9} className="h-32 text-center text-muted-foreground">
                       暂无数据
                     </TableCell>
                   </TableRow>
                 ) : (
                   records.map((record) => (
-                    <TableRow key={record.id}>
-                      <TableCell>{new Date(record.time).toLocaleString('zh-CN')}</TableCell>
-                      <TableCell>{record.batch_no}</TableCell>
-                      <TableCell>{record.package_no}</TableCell>
-                      <TableCell>{record.material_model}</TableCell>
-                      <TableCell>{record.weight}</TableCell>
-                      <TableCell>{record.thickness}</TableCell>
-                      <TableCell>
-                        <Badge variant={record.result === 'qualified' ? 'default' : 'destructive'}>
+                    <TableRow key={record.id} className="table-row-highlight">
+                      <TableCell align="center" className="text-slate-500 text-xs whitespace-nowrap">{new Date(record.time).toLocaleString('zh-CN')}</TableCell>
+                      <TableCell className="font-medium truncate" title={record.batch_no}>{record.batch_no}</TableCell>
+                      <TableCell align="center">{record.package_no}</TableCell>
+                      <TableCell className="truncate" title={record.material_model}>{record.material_model}</TableCell>
+                      <TableCell align="right" className="font-medium tabular-nums">{record.weight}</TableCell>
+                      <TableCell align="right" className="font-medium tabular-nums">{record.thickness}</TableCell>
+                      <TableCell align="center">
+                        <span className={cn(
+                          "table-status-badge",
+                          record.result === 'qualified' ? "table-status-success" : "table-status-danger"
+                        )}>
                           {record.result === 'qualified' ? '合格' : '不合格'}
-                        </Badge>
+                        </span>
                       </TableCell>
-                      <TableCell>{record.reason || '-'}</TableCell>
-                      <TableCell>{record.inspector}</TableCell>
+                      <TableCell className="text-sm">{record.reason || '-'}</TableCell>
+                      <TableCell align="center">{record.inspector}</TableCell>
                     </TableRow>
                   ))
                 )}

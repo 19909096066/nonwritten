@@ -1,6 +1,8 @@
 # Logs
 logs
 *.log
+server.log
+server/server.log
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
@@ -12,7 +14,11 @@ dist
 dist-ssr
 output
 *.local
-package-lock.json
+.env
+.env.*
+*.apk
+._*
+server.log
 
 # Editor directories and files
 .vscode/*
@@ -27,3 +33,6 @@ package-lock.json
 .sync
 history/*.json
 .vite_cache
+
+# Local-only notes
+local-notes/

@@ -1,12 +1,11 @@
 import { useEffect, useState } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Button } from '@/components/ui/button';
 import { getDashboardStats, getModelStockDistribution, getWeeklyTrend } from '@/db/api';
 import type { DashboardStats } from '@/types';
-import { Package, TrendingUp, TrendingDown, AlertCircle, Smartphone, QrCode } from 'lucide-react';
+import { Package, TrendingUp, TrendingDown, Smartphone, QrCode } from 'lucide-react';
 import { Skeleton } from '@/components/ui/skeleton';
-import { ChartContainer, ChartTooltip, ChartTooltipContent } from '@/components/ui/chart';
-import { PieChart, Pie, Cell, ResponsiveContainer, LineChart, Line, XAxis, YAxis, CartesianGrid, Legend } from 'recharts';
+
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Legend, ResponsiveContainer, Tooltip } from 'recharts';
 import QRCodeDataUrl from '@/components/ui/qrcodedataurl';
 
 export default function DashboardPage() {
@@ -36,8 +35,6 @@ export default function DashboardPage() {
       setLoading(false);
     }
   };
-
-  const COLORS = ['hsl(var(--chart-1))', 'hsl(var(--chart-2))', 'hsl(var(--chart-3))', 'hsl(var(--chart-4))', 'hsl(var(--chart-5))'];
 
   if (loading) {
     return (
@@ -117,99 +114,106 @@ export default function DashboardPage() {
 
       {/* 数据卡片 */}
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-5">
-        <Card>
+        <Card className="card-hover">
           <CardHeader className="flex flex-row items-center justify-between pb-2">
             <CardTitle className="text-sm font-medium text-muted-foreground">总库存卷数</CardTitle>
-            <Package className="h-4 w-4 text-muted-foreground" />
+            <div className="p-2 bg-primary/10 rounded-lg">
+              <Package className="h-4 w-4 text-primary" />
+            </div>
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">{stats?.totalStock || 0}</div>
+            <div className="text-3xl font-bold text-foreground">{stats?.totalStock || 0}</div>
             <p className="text-xs text-muted-foreground mt-1">当前在库</p>
           </CardContent>
         </Card>
 
-        <Card>
+        <Card className="card-hover">
           <CardHeader className="flex flex-row items-center justify-between pb-2">
             <CardTitle className="text-sm font-medium text-muted-foreground">总重量</CardTitle>
-            <Package className="h-4 w-4 text-muted-foreground" />
+            <div className="p-2 bg-blue-100 rounded-lg">
+              <Package className="h-4 w-4 text-blue-600" />
+            </div>
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">{stats?.totalWeight || 0} kg</div>
-            <p className="text-xs text-muted-foreground mt-1">当前在库</p>
+            <div className="text-3xl font-bold text-foreground">{stats?.totalWeight || 0} kg</div>
+            <p className="text-xs text-muted-foreground mt-1">在库+拆包合计</p>
           </CardContent>
         </Card>
 
-        <Card>
+        <Card className="card-hover border-l-2 border-l-green-500">
           <CardHeader className="flex flex-row items-center justify-between pb-2">
             <CardTitle className="text-sm font-medium text-muted-foreground">今日入库</CardTitle>
-            <TrendingUp className="h-4 w-4 text-primary" />
+            <div className="p-2 bg-green-100 rounded-lg">
+              <TrendingUp className="h-4 w-4 text-green-600" />
+            </div>
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold text-primary">{stats?.todayIn || 0}</div>
-            <p className="text-xs text-muted-foreground mt-1">卷</p>
+            <div className="text-3xl font-bold text-green-600">{stats?.todayIn || 0}</div>
+            <p className="text-xs text-muted-foreground mt-1">{stats?.todayInWeight || 0} kg</p>
           </CardContent>
         </Card>
 
-        <Card>
+        <Card className="card-hover border-l-2 border-l-red-500">
           <CardHeader className="flex flex-row items-center justify-between pb-2">
             <CardTitle className="text-sm font-medium text-muted-foreground">今日出库</CardTitle>
-            <TrendingDown className="h-4 w-4 text-destructive" />
+            <div className="p-2 bg-red-100 rounded-lg">
+              <TrendingDown className="h-4 w-4 text-red-600" />
+            </div>
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold text-destructive">{stats?.todayOut || 0}</div>
-            <p className="text-xs text-muted-foreground mt-1">卷</p>
+            <div className="text-3xl font-bold text-red-600">{stats?.todayOut || 0}</div>
+            <p className="text-xs text-muted-foreground mt-1">{stats?.todayOutWeight || 0} kg</p>
           </CardContent>
         </Card>
 
-        <Card>
+        <Card className="card-hover border-l-2 border-l-orange-500">
           <CardHeader className="flex flex-row items-center justify-between pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">待处理质检</CardTitle>
-            <AlertCircle className="h-4 w-4 text-destructive" />
+            <CardTitle className="text-sm font-medium text-muted-foreground">今日拆包</CardTitle>
+            <div className="p-2 bg-orange-100 rounded-lg">
+              <Package className="h-4 w-4 text-orange-600" />
+            </div>
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold text-destructive">{stats?.pendingQc || 0}</div>
-            <p className="text-xs text-muted-foreground mt-1">不合格项</p>
+            <div className="text-3xl font-bold text-orange-600">{stats?.todaySplit || 0}</div>
+            <p className="text-xs text-muted-foreground mt-1">{stats?.todaySplitWeight || 0} kg</p>
           </CardContent>
         </Card>
       </div>
 
       {/* 图表 */}
       <div className="grid gap-4 md:grid-cols-2">
-        {/* 型号库存占比饼图 */}
+        {/* 型号库存列表 */}
         <Card>
           <CardHeader>
             <CardTitle>各型号库存占比</CardTitle>
           </CardHeader>
           <CardContent>
             {modelDistribution.length > 0 ? (
-              <ChartContainer
-                config={{
-                  weight: {
-                    label: '重量',
-                    color: 'hsl(var(--chart-1))',
-                  },
-                }}
-                className="h-64"
-              >
-                <ResponsiveContainer width="100%" height="100%">
-                  <PieChart>
-                    <Pie
-                      data={modelDistribution}
-                      dataKey="weight"
-                      nameKey="model"
-                      cx="50%"
-                      cy="50%"
-                      outerRadius={80}
-                      label={(entry) => `${entry.model}: ${entry.weight}kg`}
-                    >
-                      {modelDistribution.map((entry, index) => (
-                        <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
-                      ))}
-                    </Pie>
-                    <ChartTooltip content={<ChartTooltipContent />} />
-                  </PieChart>
-                </ResponsiveContainer>
-              </ChartContainer>
+              <div className="h-64 overflow-y-auto">
+                <table className="w-full">
+                  <thead className="sticky top-0 bg-background">
+                    <tr className="border-b">
+                      <th className="text-left py-2 text-sm font-medium text-muted-foreground">型号</th>
+                      <th className="text-right py-2 text-sm font-medium text-muted-foreground">重量(kg)</th>
+                      <th className="text-right py-2 text-sm font-medium text-muted-foreground">占比</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(() => {
+                      const totalWeight = modelDistribution.reduce((sum, item) => sum + item.weight, 0);
+                      return modelDistribution.map((entry, index) => (
+                        <tr key={index} className="border-b hover:bg-muted/50">
+                          <td className="py-2 text-sm">{entry.model}</td>
+                          <td className="py-2 text-sm text-right font-medium">{entry.weight.toLocaleString()}</td>
+                          <td className="py-2 text-sm text-right text-muted-foreground">
+                            {totalWeight > 0 ? ((entry.weight / totalWeight) * 100).toFixed(1) : 0}%
+                          </td>
+                        </tr>
+                      ));
+                    })()}
+                  </tbody>
+                </table>
+              </div>
             ) : (
               <div className="h-64 flex items-center justify-center text-muted-foreground">
                 暂无数据
@@ -225,39 +229,67 @@ export default function DashboardPage() {
           </CardHeader>
           <CardContent>
             {weeklyTrend.length > 0 ? (
-              <ChartContainer
-                config={{
-                  inCount: {
-                    label: '入库',
-                    color: 'hsl(var(--chart-1))',
-                  },
-                  outCount: {
-                    label: '出库',
-                    color: 'hsl(var(--chart-2))',
-                  },
-                }}
-                className="h-64"
-              >
-                <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={weeklyTrend}>
-                    <CartesianGrid strokeDasharray="3 3" />
+              <div style={{ width: '100%', height: '350px' }}>
+                <ResponsiveContainer>
+                  <LineChart data={weeklyTrend} margin={{ top: 20, right: 30, left: 20, bottom: 20 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
                     <XAxis
                       dataKey="date"
                       tickFormatter={(value) => {
                         const date = new Date(value);
                         return `${date.getMonth() + 1}/${date.getDate()}`;
                       }}
+                      tick={{ fontSize: 12, fill: '#6b7280' }}
+                      tickLine={false}
+                      axisLine={{ stroke: '#e5e7eb' }}
                     />
-                    <YAxis />
-                    <ChartTooltip content={<ChartTooltipContent />} />
-                    <Legend />
-                    <Line type="monotone" dataKey="inCount" stroke="hsl(var(--chart-1))" name="入库" strokeWidth={2} />
-                    <Line type="monotone" dataKey="outCount" stroke="hsl(var(--chart-2))" name="出库" strokeWidth={2} />
+                    <YAxis 
+                      tick={{ fontSize: 12, fill: '#6b7280' }}
+                      tickLine={false}
+                      axisLine={{ stroke: '#e5e7eb' }}
+                      allowDecimals={false}
+                      domain={[0, 'auto']}
+                      padding={{ top: 20 }}
+                    />
+                    <Tooltip 
+                      contentStyle={{ 
+                        backgroundColor: '#fff', 
+                        border: '1px solid #e5e7eb',
+                        borderRadius: '8px',
+                        boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)'
+                      }}
+                      labelFormatter={(value) => {
+                        const date = new Date(value);
+                        return `${date.getMonth() + 1}月${date.getDate()}日`;
+                      }}
+                    />
+                    <Legend 
+                      wrapperStyle={{ paddingTop: '10px' }}
+                      iconType="circle"
+                    />
+                    <Line 
+                      type="monotone" 
+                      dataKey="inCount" 
+                      stroke="#22c55e" 
+                      name="入库" 
+                      strokeWidth={2}
+                      dot={{ r: 4, fill: '#22c55e' }}
+                      activeDot={{ r: 6, fill: '#22c55e' }}
+                    />
+                    <Line 
+                      type="monotone" 
+                      dataKey="outCount" 
+                      stroke="#ef4444" 
+                      name="出库" 
+                      strokeWidth={2}
+                      dot={{ r: 4, fill: '#ef4444' }}
+                      activeDot={{ r: 6, fill: '#ef4444' }}
+                    />
                   </LineChart>
                 </ResponsiveContainer>
-              </ChartContainer>
+              </div>
             ) : (
-              <div className="h-64 flex items-center justify-center text-muted-foreground">
+              <div className="h-[350px] flex items-center justify-center text-muted-foreground">
                 暂无数据
               </div>
             )}

@@ -1,0 +1,8 @@
+{
+  "version": "1.0.1",
+  "versionCode": 101,
+  "force": false,
+  "description": "1. 修复扫码出库状态判断问题\n2. 登录页记住账号密码功能\n3. 登录状态持久化优化",
+  "downloadUrl": "http://81.70.90.164/app/nonwoven-v1.0.1.apk",
+  "updateTime": "2026-02-27"
+}
